@@ -1,0 +1,69 @@
+# LRT Kelana Jaya Monitor
+
+An evidence-aware monitoring starter for the Kelana Jaya LRT Line. It combines historical demand, official operational facts, and public reports without presenting a prediction as official information.
+
+## Current scope
+
+Phase 1 provides a runnable vertical slice with:
+
+- SQLite storage for official facts and public signals
+- A deterministic status estimator with explainable rules
+- Historical station-hour demand baseline using a labelled demo fixture
+- FastAPI endpoints for the current status and recent signals
+- Streamlit dashboard for local exploration
+- Tests for the estimator and API contract
+
+External data collectors are intentionally adapters only. Add credentials, rate-limit handling, provenance, and terms-of-use review before connecting a live source.
+
+`data/external/demo_ridership.csv` is synthetic demonstration data, not an official Rapid Rail extract. Replace it only with a documented, lawfully obtained public dataset.
+
+## Verified official source
+
+Malaysia's official Open API documents the Prasarana GTFS static feed at `https://api.data.gov.my/gtfs-static/prasarana?category=rapid-rail-kl`. It is a schedule and network feed, not passenger counts. The current GTFS-Realtime documentation states that `rapid-rail-kl` does not yet have a stable realtime vehicle-position feed, so this project must not claim live train coverage until that changes.
+
+The current feed was downloaded and parsed successfully on 2026-08-20: one Kelana Jaya route matched and 37 stations were mapped through `trips.txt` and `stop_times.txt`. The downloaded ZIP is kept under ignored `data/raw/` storage and is not committed as application source data.
+
+The committed `data/external/kelana_jaya_stations.csv` is the derived station vocabulary used by the dashboard and public-signal validation.
+
+The dashboard accepts uploads using `data/external/historical_ridership_template.csv` and `data/external/public_reports_template.csv`. Uploaded files are used for the current Streamlit session and are not automatically committed.
+
+See `data/external/SOURCES.md` for source provenance, verification dates, and current data limitations.
+
+## Run locally
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pytest
+uvicorn src.api.main:app --reload
+streamlit run dashboard/app.py
+```
+
+API docs: http://127.0.0.1:8000/docs
+
+## Project structure
+
+```text
+lrt-kelana-jaya-monitor/
+|-- data/raw/              # immutable source extracts
+|-- data/processed/        # derived datasets
+|-- src/
+|   |-- api/main.py        # FastAPI application
+|   |-- collectors/        # source-specific adapters
+|   |-- nlp/               # signal classification
+|   |-- processing/        # cleaning and feature engineering
+|   |-- models.py          # facts, signals, and estimates
+|   |-- status.py           # explainable status estimator
+|   `-- storage.py          # SQLite repository
+|-- dashboard/app.py       # Streamlit UI
+`-- tests/
+```
+
+## Data integrity
+
+- `FACT`: officially reported transport information.
+- `SIGNAL`: an observation from a public post or other non-authoritative source.
+- `ESTIMATION`: a model output based on available facts and signals.
+
+One post is never treated as proof. Official disruption facts take precedence over social signals. Public data must be collected lawfully and employer or production data must not be uploaded.
