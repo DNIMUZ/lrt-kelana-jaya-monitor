@@ -250,3 +250,36 @@ def phrase_mentions(signals: pd.DataFrame, phrases: list[str]) -> pd.DataFrame:
     if hits.empty:
         return empty
     return hits.groupby("category").size().rename("posts").reset_index().sort_values("posts", ascending=False)
+
+
+_INCIDENT_CATEGORIES = ("crowding", "delay", "disruption")
+
+
+def incident_signals(signals: pd.DataFrame) -> pd.DataFrame:
+    """Crowding/delay/disruption signals annotated with local hour, weekday and date."""
+    inc = signals[signals["category"].isin(_INCIDENT_CATEGORIES)].copy()
+    if inc.empty:
+        return inc
+    local = pd.to_datetime(inc["observed_at"], errors="coerce", format="mixed")
+    local = local.dt.tz_convert("Asia/Kuala_Lumpur") if local.dt.tz is not None else local.dt.tz_localize("UTC").dt.tz_convert("Asia/Kuala_Lumpur")
+    inc["hour"] = local.dt.hour
+    inc["weekday"] = local.dt.day_name()
+    inc["date"] = local.dt.normalize().dt.tz_localize(None)
+    return inc
+
+
+def incident_hour_distribution(signals: pd.DataFrame) -> pd.DataFrame:
+    """Incident posts bucketed by Malaysian time-of-day window."""
+    inc = incident_signals(signals)
+    if inc.empty:
+        return pd.DataFrame(columns=["window", "posts"])
+    windows = {
+        "Overnight 0-6": inc["hour"].lt(6),
+        "Morning rush 6-9": inc["hour"].between(6, 9, inclusive="left"),
+        "Late morning 9-12": inc["hour"].between(9, 12, inclusive="left"),
+        "Noon 12-15": inc["hour"].between(12, 15, inclusive="left"),
+        "Evening rush 15-19": inc["hour"].between(15, 19, inclusive="left"),
+        "Night 19-24": inc["hour"].ge(19),
+    }
+    series = np.select(list(windows.values()), list(windows.keys()), default="Overnight 0-6")
+    return pd.Series(series).value_counts().rename_axis("window").rename("posts").reset_index()

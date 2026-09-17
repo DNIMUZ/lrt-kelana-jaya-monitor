@@ -8,6 +8,7 @@ from src.analysis.insights import (
     WEEKDAY_ORDER,
     delay_disruption_counts,
     detect_ridership_anomalies,
+    incident_hour_distribution,
     phrase_mentions,
     ridge_forecast,
     signal_ridership_lag_correlation,
@@ -148,3 +149,18 @@ def test_phrase_mentions_counts_by_category() -> None:
     mentions = phrase_mentions(signals, ["shah ala", "lrt3"])
     assert mentions.set_index("category")["posts"].to_dict() == {"crowding": 1, "other": 1}
     assert phrase_mentions(signals, ["monorail"]).empty
+
+
+def test_incident_hour_distribution_buckets_by_local_time() -> None:
+    signals = pd.DataFrame(
+        [
+            {"text": "lrt sesak", "category": "crowding", "observed_at": "2026-08-01T22:50:00+00:00"},  # 06:50 MY
+            {"text": "lrt delay", "category": "delay", "observed_at": "2026-08-01T02:00:00+00:00"},       # 10:00 MY
+            {"text": "lrt rosak", "category": "disruption", "observed_at": "2026-08-02T12:00:00+00:00"},  # 20:00 MY
+        ]
+    )
+    dist = incident_hour_distribution(signals)
+    buckets = dist.set_index("window")["posts"].to_dict()
+    assert buckets["Morning rush 6-9"] == 1
+    assert buckets["Late morning 9-12"] == 1
+    assert buckets["Night 19-24"] == 1

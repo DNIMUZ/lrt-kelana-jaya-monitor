@@ -173,6 +173,41 @@ EXTRA_STATIONS = (
     "kelebor",
 )
 
+EVENT_TERMS = (
+    "lrt terkandas",
+    "lrt berhenti",
+    "lrt tak jalan",
+    "lrt tidak beroperasi",
+    "lrt services affected",
+    "lrt update",
+    "lrt status",
+    "lrt viral",
+    "lrt heboh",
+    "lrt kemalangan",
+    "lrt berita",
+    "lrt announcement",
+    "lrt henti",
+    "lrt bertukar",
+    "lrt pindah platform",
+    "lrt signal fault",
+    "lrt isyarat",
+    "lrt semboyan",
+    "lrt overhaul",
+    "lrt naik taraf",
+    "lrt jam",
+    "lrt terlalu ramai",
+    "lrt tak cukup",
+    "lrt tak ramai",
+    "lrt kurang",
+    "lrt takde",
+    "lrt breakdown",
+    "lrt panic",
+    "lrt hampir",
+    "lrt hampir langgar",
+    "kelana jaya station",
+    "suspend lrt",
+)
+
 
 def clean_station_name(stop_name: str) -> str:
     """Strip sponsor suffixes like 'KL SENTRAL - REDONE' -> 'kl sentral'."""
@@ -202,6 +237,8 @@ def build_queries() -> list[str]:
         queries.append(f"{name} lrt")
         queries.append(f"{name} mrt")
         queries.append(f"{name} station")
+    for term in EVENT_TERMS:
+        queries.append(term)
     return queries
 
 

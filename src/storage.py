@@ -34,6 +34,13 @@ class SignalRepository:
 
     def add_signal(self, signal: PublicSignal) -> None:
         with sqlite3.connect(self.database_path) as connection:
+            author = signal.author_id or ""
+            exists = connection.execute(
+                "SELECT 1 FROM public_signals WHERE lower(author_id) = lower(?) AND lower(text) = lower(?) LIMIT 1",
+                (author, signal.text),
+            ).fetchone()
+            if exists:
+                return
             connection.execute(
                 "INSERT INTO public_signals(text, category, station, observed_at, source, independent_author, author_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (signal.text, signal.category.value, signal.station, signal.observed_at.isoformat(), signal.source, int(signal.independent_author), signal.author_id),

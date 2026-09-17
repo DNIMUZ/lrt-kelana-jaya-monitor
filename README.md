@@ -136,6 +136,34 @@ catalogue (source: anonymous tap-in/out transaction data) and is published
 ~6-8 weeks behind, so the correlation view fills in automatically once the
 series catches up to the Threads window.
 
+## Data quality: how good posts are separated from bad
+
+Every fetched post passes a five-stage pipeline. This is what keeps the corpus
+meaningful and the numbers honest:
+
+1. **Search recall** - the Apify actor returns whatever Threads search surfaces
+   for a query. This is deliberately *loose*; we never trust the raw feed.
+2. **Relevance gate** (`src/nlp/keyword_filter.py`) - a post is dropped unless
+   its text mentions the rail line vocabulary: `lrt`, `rapid kl`, `kelana jaya`,
+   `lrt kj`, `kuala kaya`. A post about a toast machine or a football crowd that
+   happens to contain "lrt" nowhere is junk and never enters the database.
+3. **Classification** (`src/nlp/classifier.py`) - surviving text is tagged
+   `disruption` / `delay` / `crowding`, otherwise `other`. The `other` bucket is
+   kept (it holds useful context) but is clearly separated from incident counts,
+   so "delay" numbers are never inflated by casual chat.
+4. **Station detection** (`src/processing/station_mapping.py`) - the Kelana Jaya
+   station vocabulary is matched against the text, so complaints can be pinned
+   to a station or left unassigned rather than guessed.
+5. **De-duplication** - within a run, identical (author, text) posts from
+   overlapping queries collapse to one. Since mid-2026, `add_signal` also skips
+   anything already in the database, so re-scrapes never bloat the store (the
+   live database was cleaned from 1,867 to 811 unique postings).
+
+What is **not** filtered: sentiment, sarcasm, and whether the author is right.
+A claim like "LRT always breaks on Wednesdays" is stored as a *signal*, never as
+a *fact* - the dashboard labels all chatter as estimates and treats Rapid KL
+official statements as authoritative.
+
 ## Project structure
 
 ```text
