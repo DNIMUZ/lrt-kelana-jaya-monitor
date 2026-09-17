@@ -102,7 +102,7 @@ with st.sidebar:
         "Ridership series to compare",
         ["rail_lrt_kj", "rail_lrt_ampang", "rail_mrt_kajang", "rail_mrt_pjy", "rail_lrt_shah_alam", "rail_monorail"],
         default=["rail_lrt_kj"],
-        help="Monitor compares all against signal/history; focus stays on rail_lrt_kj.",
+        help="Add extra rail lines to include them in the Overview comparison table. The analysis always focuses on rail_lrt_kj; other lines are context only.",
     )
 
 
@@ -146,6 +146,20 @@ if public_mode:
         "same patterns - daily category counts, hotspots, seasonality, correlation and forecast."
     )
 
+if not kj.empty:
+    ridership_as_of = kj["date"].max().date()
+else:
+    ridership_as_of = None
+if not counts.empty:
+    signals_as_of = counts["date"].max().date()
+else:
+    signals_as_of = None
+st.info(
+    f"**Data recency:** official ridership is published through **{ridership_as_of}** "
+    f"and Threads signals through **{signals_as_of}**. The government's daily figures "
+    f"arrive ~6-8 weeks late, so anything comparing recent weeks is provisional."
+)
+
 if signals.empty:
     st.warning("No signals in the database. Run `python -m src.collectors.threads_bulk` or `threads_scraper` first.")
 
@@ -156,17 +170,57 @@ overview_tab, season_tab, social_tab, delay_tab, correlation_tab = st.tabs(
 with overview_tab:
     st.subheader("Rail Kelana Jaya - headline indicators")
     this_year = kj[kj["date"].dt.year == 2026]
-    last_year = kj[kj["date"].dt.year == 2025]
+    last_year = kj[(kj["date"].dt.year == 2025) & (kj["date"] <= this_year["date"].max().replace(year=2025))] if not this_year.empty else kj.loc[[]]
     top, kpi_a, kpi_b, kpi_c, kpi_d = st.columns([1, 1, 1, 1, 1])
     top.markdown("**Averages (2026 to date)**")
     kpi_a.metric("Avg daily ridership", f"{this_year['ridership'].mean():,.0f}")
-    kpi_b.metric(
-        "Vs same period 2025",
-        f"{(this_year['ridership'].mean() / last_year['ridership'].mean() - 1) * 100:.1f}%",
-        delta_color="inverse",
-    )
+    if not last_year.empty:
+        kpi_b.metric(
+            "Vs same period 2025",
+            f"{(this_year['ridership'].mean() / last_year['ridership'].mean() - 1) * 100:.1f}%",
+            delta_color="inverse",
+            help=f"Same-day-of-year window: 2026 through {this_year['date'].max().date()} vs 2025 through {last_year['date'].max().date()}.",
+        )
+    else:
+        kpi_b.metric("Vs same period 2025", "n/a")
     kpi_c.metric("Peak day 2026", f"{this_year['ridership'].max():,.0f}")
     kpi_d.metric("Busiest weekday", weekday_seasonality(kj).sort_values("average", ascending=False).iloc[0]["weekday"])
+
+    recent = kj.dropna(subset=["ridership"]).tail(7)
+    prior = kj.dropna(subset=["ridership"]).tail(14).head(7)
+    if len(recent) >= 7 and len(prior) >= 7:
+        r_a, r_b, r_c = st.columns(3)
+        r_a.metric("Latest week avg ridership", f"{recent['ridership'].mean():,.0f}",
+                   help=f"Trailing 7 official ridership days ending {recent['date'].max().date()}.")
+        r_b.metric("Prior week avg", f"{prior['ridership'].mean():,.0f}")
+        r_c.metric("Week-over-week", f"{(recent['ridership'].mean() / prior['ridership'].mean() - 1) * 100:+.1f}%")
+        st.caption("Official ridership lags ~6-8 weeks - this is the latest *published* week, not this calendar week.")
+
+    compared = []
+    for series in allowed:
+        if series not in ridership.columns:
+            continue
+        sub = ridership.dropna(subset=[series]).copy()
+        sub_this = sub[sub["date"].dt.year == 2026]
+        if sub_this.empty:
+            continue
+        sub_cutoff = sub_this["date"].max().replace(year=2025)
+        sub_last = sub[(sub["date"].dt.year == 2025) & (sub["date"] <= sub_cutoff)]
+        if sub_last.empty:
+            continue
+        compared.append({
+            "series": series,
+            "this_year_avg": sub_this[series].mean(),
+            "last_year_avg": sub_last[series].mean(),
+        })
+    if len(compared) > 1:
+        comp_df = pd.DataFrame(compared)
+        comp_df["vs same period 2025"] = ((comp_df["this_year_avg"] / comp_df["last_year_avg"] - 1) * 100).round(1).astype(str) + "%"
+        comp_df["2026 avg/day"] = comp_df["this_year_avg"].round(0).astype(int)
+        comp_df["2025 avg/day"] = comp_df["last_year_avg"].round(0).astype(int)
+        st.write("**Cross-line comparison - same period as KJ 2026 (choose extra lines in the sidebar to show them)**")
+        for _, row in comp_df.iterrows():
+            st.markdown(f"- **{row['series']}**: {row['2026 avg/day']:,} avg/day vs {row['2025 avg/day']:,} ({row['vs same period 2025']})")
 
     chart = alt.Chart(kj).mark_line().encode(
         x=alt.X("date:T", title="Date"),
@@ -193,35 +247,49 @@ with overview_tab:
 with season_tab:
     st.subheader("Seasonality & anomaly days")
     anomalies = detect_ridership_anomalies(kj)
-    anomalous_days = anomalies[anomalies["anomalous"]]
-    st.metric("Unusually-low ridership days detected", len(anomalous_days))
-    amount = kj["ridership"].mean() if len(kj) else 0
-    if not anomalous_days.empty:
-        low_col, sample_col = st.columns([1, 2])
-        with low_col:
-            st.write("**Days flagged (z-score below -2 vs 28-day trend)**")
-            st.dataframe(
-                anomalous_days[["date", "ridership", "baseline", "z_score", "disruption"]]
-                .sort_values("z_score")
-                .reset_index(drop=True),
-                hide_index=True,
-                width="stretch",
-            )
-        with sample_col:
-            annotated = alt.Chart(anomalous_days).mark_circle(size=80).encode(
-                x=alt.X("date:T"),
-                y=alt.Y("ridership:Q"),
-                color="z_score:Q",
-                tooltip=["date", "ridership", "z_score", "disruption"],
-            )
-            trend = alt.Chart(kj).mark_line(opacity=0.4).encode(x="date:T", y="baseline:Q")
-            st.altair_chart((trend + annotated).properties(height=320), width="stretch")
-        st.info(
-            f"Detected {len(anomalous_days)} low-demand days ({len(anomalous_days) / max(len(kj), 1):.1%} of all days). "
-            f"Hover the annotated chart to see coinciding social chatter. Typical cause: public holidays and long weekends."
-        )
+    if kj.empty:
+        st.write("No ridership data available.")
     else:
-        st.write("No unusual days found in the current window.")
+        trailing = kj["date"].max() - pd.Timedelta(days=365)
+        recent_anomalies = anomalies[anomalies["date"] >= trailing]
+        anomalous_days = recent_anomalies[recent_anomalies["anomalous"]]
+        mco_days = int(
+            anomalies[anomalies["anomalous"] & (anomalies["date"] >= "2020-03-01") & (anomalies["date"] <= "2022-03-31")].shape[0]
+        )
+        last90 = int(anomalous_days[anomalous_days["date"] >= (kj["date"].max() - pd.Timedelta(days=90))].shape[0])
+        st.metric(
+            "Unusually-low days (last 12 months)",
+            len(anomalous_days),
+            delta=f"{last90} in last 90 days",
+            help=f"Flagged vs the 28-day centered baseline, z-score below -2, over the trailing 12 months ending {kj['date'].max().date()}. MCO-era dips (2020-2022, {mco_days} days) are excluded from this window.",
+        )
+        if not anomalous_days.empty:
+            low_col, sample_col = st.columns([1, 2])
+            with low_col:
+                st.write("**Days flagged (z-score below -2 vs 28-day trend, last 12 months)**")
+                st.dataframe(
+                    anomalous_days[["date", "ridership", "baseline", "z_score", "disruption"]]
+                    .sort_values("z_score")
+                    .reset_index(drop=True),
+                    hide_index=True,
+                    width="stretch",
+                )
+            with sample_col:
+                annotated = alt.Chart(anomalous_days).mark_circle(size=80).encode(
+                    x=alt.X("date:T"),
+                    y=alt.Y("ridership:Q"),
+                    color="z_score:Q",
+                    tooltip=["date", "ridership", "z_score", "disruption"],
+                )
+                trend = alt.Chart(kj[kj["date"] >= trailing]).mark_line(opacity=0.4).encode(x="date:T", y="baseline:Q")
+                st.altair_chart((trend + annotated).properties(height=320), width="stretch")
+            st.info(
+                f"Detected **{len(anomalous_days)} low-demand days in the last 12 months**. "
+                f"Hover the annotated chart to see coinciding social chatter. Typical cause: public holidays and long weekends. "
+                f"The full-history run also flags {mco_days} MCO-era days (2020-2022), which are outside this window."
+            )
+        else:
+            st.write("No unusual days found in the trailing 12 months.")
     monthly = panel.dropna(subset=["ridership"]).groupby(["year", "month"])["ridership"].mean().reset_index()
     heat = (
         alt.Chart(monthly)
