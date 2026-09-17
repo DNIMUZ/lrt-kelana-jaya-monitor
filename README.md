@@ -63,13 +63,15 @@ py -m src.collectors.threads_scraper
 Useful flags (defaults come from `.env`):
 
 ```powershell
-# Custom keywords, more depth, include replies
-py -m src.collectors.threads_scraper -k "lrt kelana jaya" "kelana jaya line" --max-results 100 --include-replies
+# Custom keywords, more depth
+py -m src.collectors.threads_scraper -k "lrt kelana jaya" "kelana jaya line" --max-results 100
 ```
 
 Defaults:
 
-- Actor: `magicfingers/threads-scraper` (`THREADS_ACTOR_ID`)
+- Actor: `santamaria-automations/threads-search-scraper` (`THREADS_ACTOR_ID`)
+  — read from Threads' server-rendered search page, which is more resilient than
+  GraphQL `doc_id`-based actors that break when Meta rotates its internal keys
 - Keywords: LRT Kelana Jaya variants incl. common misspellings (`THREADS_KEYWORDS`)
 - 50 results per query (`THREADS_MAX_RESULTS_PER_QUERY`)
 - Output: `data/lrt_monitor.db` + `data/processed/threads_*.json|csv`
@@ -77,9 +79,9 @@ Defaults:
 What it does per result: keeps only posts whose text matches the LRT keyword
 filter, classifies them (crowding/delay/disruption/other) with station mapping,
 and deduplicates overlapping search results by author + text. Search is billed
-per result by Apify ($0.50 per 1,000 posts on the default actor) and Threads
-keyword search without login only reaches back about one month, so run it on a
-schedule for continuous monitoring.
+per result by Apify (~$0.50 per 1,000 posts) and Threads keyword search without
+login only reaches back about one month, so run it on a schedule for continuous
+monitoring.
 
 ## Project structure
 

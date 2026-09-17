@@ -21,7 +21,7 @@ from ..storage import SignalRepository
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ACTOR_ID = "magicfingers/threads-scraper"
+DEFAULT_ACTOR_ID = "santamaria-automations/threads-search-scraper"
 DEFAULT_KEYWORDS = (
     "lrt kelana jaya",
     "kelana jaya line",
@@ -45,6 +45,28 @@ def build_client(token: str | None = None) -> ApifyClient:
     return ApifyClient(token)
 
 
+def _run_input_for(
+    actor_id: str,
+    keywords: Sequence[str],
+    max_results_per_query: int,
+    include_replies: bool,
+) -> dict[str, object]:
+    if "santamaria-automations/threads-search-scraper" in actor_id:
+        # Server-rendered (SSR) search actor: no GraphQL doc-id dependency.
+        return {
+            "searchQueries": list(keywords),
+            "maxPostsPerQuery": int(max_results_per_query),
+            "maxResults": 0,
+        }
+    # Generic GraphQL-based search actors.
+    return {
+        "scrapeType": "search",
+        "searchQueries": list(keywords),
+        "maxResults": int(max_results_per_query),
+        "includeReplies": bool(include_replies),
+    }
+
+
 def run_threads_search(
     client: ApifyClient,
     *,
@@ -54,12 +76,7 @@ def run_threads_search(
     include_replies: bool = False,
 ) -> list[dict[str, object]]:
     """Run a keyword search against an Apify Threads actor and return raw items."""
-    run_input = {
-        "scrapeType": "search",
-        "searchQueries": list(keywords),
-        "maxResults": int(max_results_per_query),
-        "includeReplies": bool(include_replies),
-    }
+    run_input = _run_input_for(actor_id, keywords, max_results_per_query, include_replies)
     logger.info("Running Threads search with actor=%s queries=%s", actor_id, keywords)
     run = client.actor(actor_id).call(run_input=run_input)
     dataset_id = (run or {}).get("defaultDatasetId")
@@ -136,7 +153,7 @@ def _coerce_datetime(value: object) -> datetime | None:
 
 
 def _extract_observed_at(item: dict[str, object]) -> datetime:
-    keys = ("timestamp", "taken_at", "created_at", "published_at", "date", "observed_at")
+    keys = ("timestamp", "taken_at", "created_at", "published_at", "posted_at", "date", "observed_at")
     for key in keys:
         parsed = _coerce_datetime(item.get(key))
         if parsed is not None:
@@ -193,6 +210,7 @@ def _signal_dicts(signals: Sequence[PublicSignal]) -> list[dict[str, object]]:
     for signal in signals:
         record = asdict(signal)
         record["category"] = signal.category.value
+        record["observed_at"] = signal.observed_at.isoformat()
         payload.append(record)
     return payload
 

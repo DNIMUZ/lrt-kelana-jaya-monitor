@@ -4,7 +4,7 @@ from ..models import PublicSignal, SignalCategory
 from ..processing.station_mapping import find_station_mentions
 
 _KEYWORDS = {
-    SignalCategory.DISRUPTION: ("breakdown", "rosak", "ditutup", "shutdown", "interruption"),
+    SignalCategory.DISRUPTION: ("breakdown", "rosak", "ditutup", "shutdown", "interruption", "problem", "masalah", "bermasalah", "gangguan"),
     SignalCategory.DELAY: ("delay", "lambat", "waiting", "tunggu", "slow"),
     SignalCategory.CROWDING: ("crowded", "sesak", "packed", "queue", "beratur", "busy"),
 }

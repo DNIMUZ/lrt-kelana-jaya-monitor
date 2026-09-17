@@ -12,3 +12,8 @@ def test_public_report_gets_official_station_id() -> None:
     signal = classify_text("LRT KJ14 sangat sesak", station_mapping=mapping)
     assert signal.category.value == "crowding"
     assert signal.station == "KJ14"
+
+
+def test_lrt_problem_is_disruption() -> None:
+    signal = classify_text("LRT Kelana Jaya line ada problem lagi hari ni", station_mapping=None)
+    assert signal.category.value == "disruption"
