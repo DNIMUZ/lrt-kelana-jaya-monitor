@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -25,6 +26,12 @@ from src.analysis.insights import (
     trend_split,
     weekday_seasonality,
 )
+from src.analysis.export_public import (
+    PUBLIC_DIR,
+    load_public_daily_counts,
+    load_public_signals,
+    summary_exists,
+)
 from src.analysis.merged import (
     daily_signal_counts,
     load_ridership_headline,
@@ -36,6 +43,7 @@ from src.analysis.merged import (
 ROOT = Path(__file__).parents[1]
 DEFAULT_DB = ROOT / "data" / "lrt_monitor.db"
 DEFAULT_RIDERSHIP = ROOT / "data" / "ridership_headline.csv"
+FORCE_PUBLIC = os.getenv("INSIGHTS_DATASET", "").casefold() == "public"
 RIDERSHIP_LABEL = "rail_lrt_kj ridership"
 
 st.set_page_config(page_title="LRT Kelana Jaya | Insights", page_icon="LRT", layout="wide")
@@ -67,7 +75,16 @@ Two honest caveats:
 with st.sidebar:
     st.header("Data sources")
     ridership_path = st.text_input("Gov ridership CSV (daily)", value=str(DEFAULT_RIDERSHIP))
-    db_path = st.text_input("Signals SQLite DB", value=str(DEFAULT_DB))
+    full_db = (not FORCE_PUBLIC) and Path(DEFAULT_DB).exists()
+    if full_db:
+        db_path = st.text_input("Signals SQLite DB", value=str(DEFAULT_DB), help="Full private dataset: post texts + author IDs from your local SQLite store.")
+    else:
+        db_path = ""
+        st.info(
+            "**Privacy-safe public build**: this deployment reads only lightweight aggregates from "
+            "`data/published/` - daily category counts, station mentions and incident timestamps. "
+            "Post texts and author identities are never included."
+        )
     allowed = st.multiselect(
         "Ridership series to compare",
         ["rail_lrt_kj", "rail_lrt_ampang", "rail_mrt_kajang", "rail_mrt_pjy", "rail_lrt_shah_alam", "rail_monorail"],
@@ -78,16 +95,33 @@ with st.sidebar:
 
 @st.cache_data(show_spinner=False)
 def load_data(ridership_path: str, db_path: str):
-    signals = load_signals_dataframe(db_path)
     ridership = load_ridership_headline(ridership_path)
+    use_public = bool(not db_path) or not Path(DEFAULT_DB).exists()
+    if use_public:
+        if not summary_exists(PUBLIC_DIR):
+            raise FileNotFoundError(
+                "No signal data available. Run `python -m src.analysis.export_public` locally to generate the "
+                "privacy-safe aggregates, then deploy again."
+            )
+        signals = load_public_signals(PUBLIC_DIR)
+        counts = load_public_daily_counts(PUBLIC_DIR)
+        panel = merge_daily_panel(signals, ridership)
+        return signals, ridership, panel, counts, True
+    signals = load_signals_dataframe(db_path)
     panel = merge_daily_panel(signals, ridership)
     counts = daily_signal_counts(signals)
-    return signals, ridership, panel, counts
+    return signals, ridership, panel, counts, False
 
 
-signals, ridership, panel, counts = load_data(ridership_path, db_path)
+signals, ridership, panel, counts, public_mode = load_data(ridership_path, db_path)
 latest_ridership = panel["date"].max()
 kj = panel.dropna(subset=["ridership"])
+
+if public_mode:
+    st.info(
+        "**Public (aggregated) build.** Post texts and author identities are kept private; this view exposes the "
+        "same patterns - daily category counts, hotspots, seasonality, correlation and forecast."
+    )
 
 if signals.empty:
     st.warning("No signals in the database. Run `python -m src.collectors.threads_bulk` or `threads_scraper` first.")
@@ -237,14 +271,17 @@ with social_tab:
                     width="stretch",
                 )
 
-        st.subheader("Sample signal text")
-        st.dataframe(
-            signals.sort_values("observed_at", ascending=False)[["observed_at", "category", "station", "text"]].head(25).reset_index(
-                drop=True
-            ),
-            hide_index=True,
-            width="stretch",
-        )
+        if not public_mode:
+            st.subheader("Sample signal text")
+            st.dataframe(
+                signals.sort_values("observed_at", ascending=False)[["observed_at", "category", "station", "text"]].head(25).reset_index(
+                    drop=True
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+        else:
+            st.caption("Full post listings are excluded from the public build to protect author privacy.")
 
 
 with delay_tab:
@@ -425,16 +462,24 @@ with delay_tab:
     spike_recent = spike[pd.to_datetime(spike["date"]) >= pd.Timestamp("2026-09-10")]
     maint = 0
     fault = 0
-    if len(spike_recent):
+    if len(spike_recent) and not public_mode:
         maint = int(spike_recent["text"].astype(str).str.lower().str.contains("overhaul|naik taraf|peningkatan|kerja", na=False).sum())
         fault = int(spike_recent["text"].astype(str).str.lower().str.contains("semboyan|signall|isyarat|kejejas|gangguan sistem", na=False).sum())
     sa_links = int(sa_crowd["posts"].sum()) if not sa_crowd.empty else 0
-    st.markdown(
-        f"- **The delays are mostly maintenance & signalling - not transfers.** In the recent spike window "
-        f"(since 10 Sep), posts name **track overhaul / works** ({maint} posts) and **a signalling system fault** "
-        f"({fault} posts - Rapid KL itself issued a 'gangguan sistem semboyan' statement on 15 Sep). "
-        f"Only **{sa_links} post(s)** link crowding with Shah Alam or Putra Heights."
-    )
+    if public_mode:
+        st.markdown(
+            "- **Text-level attribution is hidden in the public build.** In the private full dataset, the recent "
+            "spike window names track-overhaul works and a signalling-system fault (Rapid KL statement, 15 Sep) "
+            "as the immediate causes - not the Shah Alam opening. Re-run the dashboard locally (or set "
+            "`INSIGHTS_DATASET=full`) to see the quoted counts."
+        )
+    else:
+        st.markdown(
+            f"- **The delays are mostly maintenance & signalling - not transfers.** In the recent spike window "
+            f"(since 10 Sep), posts name **track overhaul / works** ({maint} posts) and **a signalling system fault** "
+            f"({fault} posts - Rapid KL itself issued a 'gangguan sistem semboyan' statement on 15 Sep). "
+            f"Only **{sa_links} post(s)** link crowding with Shah Alam or Putra Heights."
+        )
     st.warning(
         "**Bottom line:** delay/disturbance chatter really did increase - but the current evidence points to the KJ "
         "line's own overhaul works and signalling faults, **not** the Shah Alam opening. The 'crowd transfer' theory is "

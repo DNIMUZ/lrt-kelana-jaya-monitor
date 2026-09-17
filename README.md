@@ -168,6 +168,49 @@ catalogue (source: anonymous tap-in/out transaction data) and is published
 ~6-8 weeks behind, so the correlation view fills in automatically once the
 series catches up to the Threads window.
 
+## Publishing to Streamlit Community Cloud (privacy-first)
+
+Anyone who visits a deployed Streamlit app can see exactly what your code
+renders, and anything committed to the GitHub repo it builds from is public.
+This project ships **two data modes** so you can publish the dashboard without
+publishing the corpus:
+
+- **Full mode (locally):** reads the private SQLite store
+  (`data/lrt_monitor.db`). Post texts, author identities and the Apify token
+  never leave your machine.
+- **Public mode (deployed):** the app auto-detects that the database file is
+  not present and switches to lightweight, committed aggregates in
+  `data/published/` - daily category counts, station mentions and incident
+  timestamps. No post text, no author IDs, no token.
+
+Files that stay private (all git-ignored): `*.db`, `.env`,
+`.streamlit/secrets.toml`, `data/processed/*`.
+
+### Steps to publish
+
+1. **Generate the public aggregates** (do this whenever you scrape new data):
+   ```powershell
+   py -m src.analysis.export_public
+   git add data/published
+   git commit -m "data: refresh public aggregates"
+   git push
+   ```
+2. Push the app to GitHub and open a Pull Request to `main`. Community Cloud
+   builds from the repo's default branch, so merge the PR first.
+3. Go to https://share.streamlit.io -> **Create app** -> pick the repo
+   (`DNIMUZ/lrt-kelana-jaya-monitor`) -> Main file: `dashboard/insights_app.py`.
+4. Advanced settings: Python version **3.12**. No secrets are required - the
+   deployment deliberately runs without the Apify token or the database.
+5. Deploy. The app opens in **public mode** (sidebar shows the privacy banner).
+   Anyone with the URL can see it; the underlying post corpus stays private.
+
+To regenerate/refresh insights on the live app, repeat step 1 and redeploy.
+
+**Optional alternative:** keep the GitHub repo **private** and still host on
+Community Cloud (you grant repo access during app setup). That lets you commit
+almost anything - but remember the deployed app URL itself remains publicly
+shareable, so public mode is still the safe default.
+
 ## Data quality: how good posts are separated from bad
 
 Every fetched post passes a five-stage pipeline. This is what keeps the corpus

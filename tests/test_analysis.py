@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.analysis.export_public import export_public_artifacts, load_public_daily_counts, load_public_signals
 from src.analysis.insights import (
     WEEKDAY_ORDER,
     delay_disruption_counts,
@@ -164,3 +165,34 @@ def test_incident_hour_distribution_buckets_by_local_time() -> None:
     assert buckets["Morning rush 6-9"] == 1
     assert buckets["Late morning 9-12"] == 1
     assert buckets["Night 19-24"] == 1
+
+
+def test_public_export_strips_text_and_authors(tmp_path) -> None:
+    signals = pd.concat(
+        [
+            _synthetic_signals(),
+            pd.DataFrame(
+                [
+                    {
+                        "text": "saya tulis rahsia ini",  # must never reach the public CSVs
+                        "category": "disruption",
+                        "station": "KJ9",
+                        "author_id": "secretuser",
+                        "observed_at": "2026-09-02T01:00:00+00:00",
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    artifacts = export_public_artifacts(signals, tmp_path)
+    incidents = pd.read_csv(artifacts["incidents_posts"])
+    assert "text" not in incidents.columns
+    assert "author_id" not in incidents.columns
+    assert "secret" not in "\n".join(incidents.astype(str).to_string().splitlines())
+    daily = load_public_daily_counts(tmp_path)
+    assert {"disruption", "crowding", "total"}.issubset(daily.columns)
+    loaded = load_public_signals(tmp_path)
+    assert len(loaded) == len(signals[signals["category"].isin(["crowding", "delay", "disruption"])])
+    assert loaded["text"].eq("").all()
+    assert loaded["author_id"].isna().all()
