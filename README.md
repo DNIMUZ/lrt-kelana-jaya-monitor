@@ -83,6 +83,55 @@ per result by Apify (~$0.50 per 1,000 posts) and Threads keyword search without
 login only reaches back about one month, so run it on a schedule for continuous
 monitoring.
 
+## Bulk collection (2000+ posts)
+
+`src/collectors/threads_bulk.py` scales the same actor across 270+ keyword
+combinations (line terms, commute vocabulary, every Kelana Jaya station, other KL
+rail lines) with checkpointed chunk caches and parallel actor runs:
+
+```powershell
+py -m src.collectors.threads_bulk --chunk-size 20 --concurrency 3 --sleep 15
+```
+
+Flags: `--max-posts` (per query), `--fresh` (re-scrape everything), `--sleep`
+(seconds between runs, raise it if Threads starts returning 0-result chunks).
+
+- Raw unique posts are exported to `data/processed/threads_raw_*.csv` (all posts,
+  pre-filter) alongside the classified LRT signal set.
+- Costs credits on the Apify FREE plan ($5/month cap - the full 270-query pass
+  costs ~$1-3). When the cap trips, actors return `x402 payment required` and
+  scraping resumes automatically after the monthly reset or a top-up; chunk
+  caches make re-runs cheap.
+
+## Insights dashboard (social x ridership)
+
+`dashboard/insights_app.py` merges the Threads corpus with Malaysia's official
+daily ridership and is designed for publishing (Streamlit Community Cloud,
+Streamlit Enterprise, or any container):
+
+```powershell
+streamlit run dashboard/insights_app.py
+```
+
+Tabs:
+
+1. **Overview** - rail_lrt_kj headline indicators, YoY comparison, weekday bars.
+2. **Seasonality & Anomalies** - weekday pattern, year-month heatmap, unusually
+   low ridership days (holidays, MCO, disruptions).
+3. **Social Signals** - daily posts by category, most-mentioned stations, most
+   active authors, sample text.
+4. **Correlation & Forecast** - lagged Pearson correlation of disruption chatter
+   vs ridership, same-day scatter, and a weekday-driven ridge forecast with
+   holdout MAE / MAPE / R².
+
+Data plumbing: `src/analysis/merged.py` (signals DB + gov CSV -> daily panel,
+Malaysia UTC+8 bucketing) and `src/analysis/insights.py` (seasonality, anomaly
+detection, lag correlation, ridge forecast). The official ridership series
+(`data/ridership_headline.csv`) is the data.gov.my `ridership_headline`
+catalogue (source: anonymous tap-in/out transaction data) and is published
+~6-8 weeks behind, so the correlation view fills in automatically once the
+series catches up to the Threads window.
+
 ## Project structure
 
 ```text

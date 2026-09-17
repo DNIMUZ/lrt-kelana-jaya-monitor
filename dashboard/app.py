@@ -106,5 +106,5 @@ if signal_summary:
 			for summary in signal_summary
 		],
 		hide_index=True,
-		use_container_width=True,
+		width="stretch",
 	)

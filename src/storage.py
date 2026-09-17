@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
+from typing import Sequence
 
 from .models import PublicSignal, SignalCategory
 
@@ -45,3 +47,33 @@ class SignalRepository:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def all_signals(self, limit: int | None = None) -> list[dict[str, object]]:
+        """All stored signals, oldest first. Optional row cap for large stores."""
+        with sqlite3.connect(self.database_path) as connection:
+            connection.row_factory = sqlite3.Row
+            if limit is None:
+                rows = connection.execute(
+                    "SELECT text, category, station, observed_at, source, independent_author, author_id FROM public_signals ORDER BY observed_at ASC"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT text, category, station, observed_at, source, independent_author, author_id FROM public_signals ORDER BY observed_at ASC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_signals_typed(self, limit: int = 50) -> list[PublicSignal]:
+        rows = self.recent_signals(limit)
+        return [
+            PublicSignal(
+                text=str(row["text"]),
+                category=SignalCategory(str(row["category"])),
+                station=str(row["station"]) if row["station"] else None,
+                observed_at=datetime.fromisoformat(str(row["observed_at"])),
+                source=str(row["source"]),
+                independent_author=bool(row["independent_author"]),
+                author_id=str(row["author_id"]) if row["author_id"] else None,
+            )
+            for row in rows
+        ]
