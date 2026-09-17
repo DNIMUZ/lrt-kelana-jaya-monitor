@@ -173,21 +173,20 @@ series catches up to the Threads window.
 Keep the repository public and *still* carry the full corpus (texts + authors)
 between your own devices without ever committing it. The app already knows how:
 sidebar shows **"Full mode via Supabase"** whenever it finds
-`SUPABASE_URL` / `SUPABASE_KEY` in `.env` and no local database file.
+`SUPABASE_DATABASE_URL` in `.env` and no local database file.
 
-1. Create a **free** project at https://supabase.com. Copy the **Project URL**
-   and the **service_role key** (Settings -> API keys).
-2. Put them in `.env` (this file is git-ignored - never commit the key):
+1. Create a **free** project at https://supabase.com. In **Project Settings ->
+   Database -> Connection string (URI)**, copy the pooler connection string
+   (it looks like `postgresql://postgres.xxxx:password@aws-...pooler.supabase.com:5432/postgres`).
+   If the `@` in the password trips the parser, URL-encode it as `%40`.
+2. Put it in `.env` (this file is git-ignored - never commit the password):
    ```dotenv
-   SUPABASE_URL=https://YOURPROJECT.supabase.co
-   SUPABASE_KEY=YOUR_SERVICE_ROLE_KEY
+   SUPABASE_DATABASE_URL=postgresql://postgres.xxxx:your_password@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres
    ```
-3. Create the table once:
+3. Create the table automatically (idempotent - no SQL editor needed):
    ```powershell
    py -m src.analysis.supabase_sync init
    ```
-   Paste the printed SQL into the Supabase **SQL editor** and run it (table +
-   row-level security so the anon key gets nothing).
 4. Upload your local corpus (idempotent - safe to rerun after any new scrape):
    ```powershell
    py -m src.analysis.supabase_sync push
@@ -202,8 +201,8 @@ sidebar shows **"Full mode via Supabase"** whenever it finds
 
 > Safety rule: the deployed dashboard must keep running in **public mode** (set
 > `INSIGHTS_DATASET=public` in Streamlit's app settings). If you pushed the
-> Supabase key into Streamlit **secrets**, the live app would render the full
-> corpus publicly to anyone with the URL - do not do this.
+> Supabase password into Streamlit **secrets**, the live app would render the
+> full corpus publicly to anyone with the URL - do not do this.
 
 ## Publishing to Streamlit Community Cloud (privacy-first)
 

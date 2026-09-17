@@ -2,48 +2,97 @@ from __future__ import annotations
 
 import hashlib
 import os
+import ssl
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import pandas as pd
-import requests
 
 from ..models import PublicSignal, SignalCategory
 from ..storage import SignalRepository
 
 SIGNALS_TABLE = "signals"
-SIGNALS_DDL = """
-create table public.signals (
-    id bigint generated always as identity primary key,
-    dedupe_key text unique not null,
-    text text not null,
-    category text not null,
+SCHEMA_SQL = f"""
+CREATE TABLE IF NOT EXISTS public.{SIGNALS_TABLE} (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    dedupe_key text NOT NULL UNIQUE,
+    text text NOT NULL,
+    category text NOT NULL,
     station text,
     author_id text,
-    observed_at timestamptz not null,
-    created_at timestamptz not null default now()
+    observed_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
 );
-
-alter table public.signals enable row level security;
-
--- Read/write only for the service-role (server-side) key. The anon key gets nothing.
-create policy "service role full access"
-on public.signals
-for all
-to authenticated, service_role
-using (true)
-with check (true);
+ALTER TABLE public.{SIGNALS_TABLE} ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "service_role full access" ON public.{SIGNALS_TABLE};
+CREATE POLICY "service_role full access" ON public.{SIGNALS_TABLE}
+    FOR ALL TO authenticated, service_role USING (true) WITH CHECK (true);
 """
+UPSERT_PREFIX = (
+    f"INSERT INTO public.{SIGNALS_TABLE} (dedupe_key, text, category, station, author_id, observed_at) VALUES "
+)
+UPSERT_CONFLICT = (
+    "ON CONFLICT (dedupe_key) DO UPDATE SET "
+    "text = EXCLUDED.text, category = EXCLUDED.category, station = EXCLUDED.station, "
+    "author_id = EXCLUDED.author_id, observed_at = EXCLUDED.observed_at;"
+)
 
 
-def supabase_creds() -> dict[str, str] | None:
-    """Read Supabase connection details from the environment / .env file."""
-    url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
-    key = os.getenv("SUPABASE_KEY", "").strip()
-    if not (url and key):
+def _require_ssl(parsed: Any) -> ssl.SSLContext | None:
+    mode = "require"
+    for item in (parsed.query or "").split("&"):
+        if "=" in item:
+            key, _, value = item.partition("=")
+            if key == "sslmode":
+                mode = value
+    if mode == "disable":
         return None
-    return {"url": url, "key": key}
+    if mode in ("verify-full", "verify-ca"):
+        return ssl.create_default_context()
+    return ssl._create_unverified_context()
+
+
+def supabase_creds() -> dict[str, Any] | None:
+    """Parse SUPABASE_DATABASE_URL (Postgres connection URI) into connect kwargs."""
+    url = os.getenv("SUPABASE_DATABASE_URL", "").strip()
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        return None
+    return {
+        "host": parsed.hostname,
+        "port": parsed.port or 5432,
+        "user": unquote(parsed.username or "postgres"),
+        "password": unquote(parsed.password or ""),
+        "database": parsed.path.lstrip("/") or "postgres",
+        "ssl": _require_ssl(parsed),
+    }
+
+
+def _connect():
+    import pg8000
+
+    creds = supabase_creds()
+    if not creds:
+        raise RuntimeError("SUPABASE_DATABASE_URL is not set. Add it to .env (see README).")
+    kwargs = {key: creds[key] for key in ("host", "port", "user", "password", "database")}
+    kwargs["timeout"] = 30
+    if creds["ssl"]:
+        try:
+            return pg8000.connect(**kwargs, ssl_context=creds["ssl"])
+        except pg8000.exceptions.InterfaceError:
+            return pg8000.connect(**kwargs)
+    return pg8000.connect(**kwargs)
+
+
+def ensure_schema(connection) -> None:
+    """Create table + row-level-security policy (idempotent)."""
+    with connection.cursor() as cursor:
+        cursor.execute(SCHEMA_SQL)
+    connection.commit()
 
 
 def dedupe_key(author_id: str | None, text: str) -> str:
@@ -52,8 +101,17 @@ def dedupe_key(author_id: str | None, text: str) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+def _as_utc(value: Any) -> datetime:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("UTC")
+    else:
+        timestamp = timestamp.tz_convert("UTC")
+    return timestamp.to_pydatetime()
+
+
 def rows_from_signals(signals: pd.DataFrame) -> list[dict[str, Any]]:
-    """Map the analysis DataFrame to PostgREST upsert rows."""
+    """Map the analysis DataFrame to (dedupe_key, text, category, station, author_id, observed_at)."""
     rows: list[dict[str, Any]] = []
     for _, signal in signals.iterrows():
         text = str(signal.get("text", ""))
@@ -65,14 +123,28 @@ def rows_from_signals(signals: pd.DataFrame) -> list[dict[str, Any]]:
                 "category": str(signal.get("category")),
                 "station": signal.get("station") or None,
                 "author_id": str(author_id) if author_id else None,
-                "observed_at": pd.Timestamp(signal.get("observed_at")).isoformat(),
+                "observed_at": _as_utc(signal.get("observed_at")),
             }
         )
     return rows
 
 
+def _bind_rows(rows: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+    return [
+        (
+            row["dedupe_key"],
+            row["text"],
+            row["category"],
+            row["station"],
+            row["author_id"],
+            row["observed_at"],
+        )
+        for row in rows
+    ]
+
+
 def rows_to_dataframe(rows: list[dict[str, Any]]) -> pd.DataFrame:
-    """Convert PostgREST rows back into the standard signal DataFrame."""
+    """Convert result rows back into the standard signal DataFrame."""
     return pd.DataFrame(
         [
             {
@@ -90,55 +162,44 @@ def rows_to_dataframe(rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 def push_signals(signals: pd.DataFrame, chunk_size: int = 400) -> int:
     """Upsert all signal rows into Supabase (idempotent via dedupe_key). Returns rows pushed."""
-    creds = supabase_creds()
-    if not creds:
-        raise RuntimeError("SUPABASE_URL / SUPABASE_KEY not set. Add them to .env")
-    rows = rows_from_signals(signals)
-    pushed = 0
-    for start in range(0, len(rows), chunk_size):
-        batch = rows[start : start + chunk_size]
-        response = requests.post(
-            f"{creds['url']}/rest/v1/{SIGNALS_TABLE}",
-            params={"on_conflict": "dedupe_key"},
-            headers={
-                "apikey": creds["key"],
-                "Authorization": f"Bearer {creds['key']}",
-                "Content-Type": "application/json",
-                "Prefer": "resolution=merge-duplicates,count=exact",
-            },
-            json=batch,
-            timeout=60,
-        )
-        response.raise_for_status()
-        pushed += len(batch)
-    return pushed
+    rows = _bind_rows(rows_from_signals(signals))
+    connection = _connect()
+    try:
+        ensure_schema(connection)
+        for start in range(0, len(rows), chunk_size):
+            batch = rows[start : start + chunk_size]
+            sql = UPSERT_PREFIX + ", ".join(["(%s, %s, %s, %s, %s, %s)"] * len(batch)) + " " + UPSERT_CONFLICT
+            flat = [value for row in batch for value in row]
+            with connection.cursor() as cursor:
+                cursor.execute(sql, flat)
+        connection.commit()
+    finally:
+        connection.close()
+    return len(rows)
 
 
 def fetch_signals() -> pd.DataFrame:
     """Download every signal from Supabase, oldest first."""
-    creds = supabase_creds()
-    if not creds:
-        raise RuntimeError("SUPABASE_URL / SUPABASE_KEY not set. Add them to .env")
-    url = f"{creds['url']}/rest/v1/{SIGNALS_TABLE}?select=*&order=observed_at.asc"
+    connection = _connect()
     rows: list[dict[str, Any]] = []
-    while url:
-        response = requests.get(
-            url,
-            headers={
-                "apikey": creds["key"],
-                "Authorization": f"Bearer {creds['key']}",
-                "Accept": "application/json",
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
-        chunk = response.json()
-        rows.extend(chunk)
-        url = None
-        if len(chunk) == 1000:
-            last = str(chunk[-1]["observed_at"])
-            url = f"{creds['url']}/rest/v1/{SIGNALS_TABLE}?select=*&order=observed_at.asc&observed_at=gt.{last}"
-
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT text, category, station, author_id, observed_at "
+                f"FROM public.{SIGNALS_TABLE} ORDER BY observed_at ASC"
+            )
+            for record in cursor:
+                rows.append(
+                    {
+                        "text": record[0],
+                        "category": record[1],
+                        "station": record[2],
+                        "author_id": record[3],
+                        "observed_at": record[4],
+                    }
+                )
+    finally:
+        connection.close()
     frame = rows_to_dataframe(rows)
     frame["observed_at"] = pd.to_datetime(frame["observed_at"], errors="coerce", format="mixed", utc=True)
     return frame
@@ -158,30 +219,35 @@ def main() -> int:
 
     load_dotenv()
     command = sys.argv[1] if len(sys.argv) > 1 else "push"
-    creds = supabase_creds()
-    if not creds:
-        print("Set SUPABASE_URL and SUPABASE_KEY in .env first (see README).")
+    if not supabase_creds():
+        print("Set SUPABASE_DATABASE_URL in .env first (see README).")
         return 1
 
     db = os.getenv("LRT_DATABASE_PATH", "data/lrt_monitor.db")
     if command == "init":
-        print("Create table in the Supabase SQL editor, then run 'push':")
-        print(SIGNALS_DDL)
+        connection = _connect()
+        try:
+            ensure_schema(connection)
+        finally:
+            connection.close()
+        print(f"Schema ready on Supabase ({SIGNALS_TABLE} table + RLS policy).")
         return 0
 
     sessions = SignalRepository(db)
     if command == "push":
-        rows = [
-            {
-                "text": str(row["text"]),
-                "category": str(row["category"]),
-                "station": row["station"] or None,
-                "author_id": row["author_id"] or None,
-                "observed_at": pd.Timestamp(row["observed_at"]),
-            }
-            for row in sessions.all_signals()
-        ]
-        count = push_signals(pd.DataFrame(rows))
+        signals = pd.DataFrame(
+            [
+                {
+                    "text": str(row["text"]),
+                    "category": str(row["category"]),
+                    "station": row["station"] or None,
+                    "author_id": row["author_id"] or None,
+                    "observed_at": _as_utc(row["observed_at"]),
+                }
+                for row in sessions.all_signals()
+            ]
+        )
+        count = push_signals(signals)
         print(f"Pushed {count} signal rows to Supabase ({SIGNALS_TABLE}).")
         return 0
 

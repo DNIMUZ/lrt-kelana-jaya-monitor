@@ -23,6 +23,7 @@ from src.analysis.supabase_sync import (
     push_signals,
     rows_from_signals,
     rows_to_dataframe,
+    supabase_creds,
 )
 
 
@@ -223,27 +224,72 @@ def test_rows_from_signals_dedupeable_and_roundtrips() -> None:
     assert restored["text"].tolist() == signals["text"].tolist()
 
 
-def test_push_signals_batches_and_deduplicates(monkeypatch) -> None:
-    captured: list[dict] = []
-    import requests
+class _FakeCursor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list]] = []
 
-    def fake_post(url, params=None, headers=None, json=None, timeout=None):
-        assert params.get("on_conflict") == "dedupe_key"
-        assert "signals" in url
-        assert headers["Prefer"].startswith("resolution=merge-duplicates")
-        captured.append({"url": url, "payload": json})
-        return type("R", (), {"raise_for_status": lambda self: None})()
+    def __enter__(self):
+        return self
 
-    monkeypatch.setattr(requests, "post", fake_post)
-    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
-    monkeypatch.setenv("SUPABASE_KEY", "service-key")
+    def __exit__(self, *args) -> None:
+        return None
 
+    def execute(self, sql: str, params: list | None = None) -> None:
+        self.calls.append((sql, params or []))
+
+    def executemany(self, sql: str, rows: list) -> None:
+        self.calls.append((sql, rows))
+
+
+class _FakeConnection:
+    def __init__(self) -> None:
+        self._cursor = _FakeCursor()
+
+    def cursor(self) -> _FakeCursor:
+        return self._cursor
+
+    def commit(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def test_push_signals_batches_and_dedupes(monkeypatch) -> None:
+    def fake_connect() -> _FakeConnection:
+        return new_conn
+
+    monkeypatch.setattr("src.analysis.supabase_sync._connect", fake_connect)
+    monkeypatch.setenv(
+        "SUPABASE_DATABASE_URL",
+        "postgresql://postgres.x:secret%40x@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres",
+    )
+    new_conn = _FakeConnection()
     signals = pd.concat([_synthetic_signals(), _synthetic_signals()], ignore_index=True)
     pushed = push_signals(signals, chunk_size=100)
     assert pushed == len(signals)
-    assert len(captured) == 1
-    deduped = {row["dedupe_key"] for batch in captured for row in batch["payload"]}
-    assert len(deduped) == 4  # not 8: same dedupe_key sent once thanks to dedupe_key identity
+    calls = new_conn._cursor.calls
+    assert any("CREATE TABLE IF NOT EXISTS" in sql for sql, _ in calls)
+    upsert = [(sql, rows) for sql, rows in calls if "ON CONFLICT (dedupe_key)" in sql]
+    assert len(upsert) == 1
+    sql, params = upsert[0]
+    assert "(?, ?, ?, ?, ?, ?)" not in sql and "(%s, %s, %s, %s, %s, %s)" in sql
+    assert len(params) == 6 * len(signals)
+    keys = {params[index] for index in range(0, len(params), 6)}
+    assert len(keys) == 4
+
+
+def test_supabase_creds_parses_encoded_password(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "SUPABASE_DATABASE_URL",
+        "postgresql://postgres.x:myLRTproject%40123@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres",
+    )
+    creds = supabase_creds()
+    assert creds["user"] == "postgres.x"
+    assert creds["password"] == "myLRTproject@123"
+    assert creds["host"] == "aws-0-ap-northeast-1.pooler.supabase.com"
+    assert creds["port"] == 5432
+    assert creds["database"] == "postgres"
 
 
 def test_naive_utc_handles_z_and_offset() -> None:
