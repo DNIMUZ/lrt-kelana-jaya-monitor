@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import Ridge
+
+from src.analysis.merged import malaysia_date
 
 WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
@@ -192,3 +196,57 @@ def station_mention_counts(signals: pd.DataFrame) -> pd.DataFrame:
 def author_activity(signals: pd.DataFrame) -> pd.DataFrame:
     counts = signals[signals["author_id"].notna()].groupby("author_id").size().sort_values(ascending=False)
     return counts.rename("posts").reset_index()
+
+
+def delay_disruption_counts(signals: pd.DataFrame, rolling: int = 7) -> pd.DataFrame:
+    """Daily delay+disruption post counts with a trailing N-day average."""
+    if signals.empty or "category" not in signals.columns:
+        return pd.DataFrame(columns=["date", "posts", f"rolling_{rolling}d"])
+    dd = signals[signals["category"].isin(["delay", "disruption"])].copy()
+    if dd.empty:
+        return pd.DataFrame(columns=["date", "posts", f"rolling_{rolling}d"])
+    dd["date"] = malaysia_date(dd)
+    daily = dd.dropna(subset=["date"]).groupby("date").size().rename("posts").reset_index()
+    if daily.empty:
+        return pd.DataFrame(columns=["date", "posts", f"rolling_{rolling}d"])
+    full_dates = pd.DataFrame({"date": pd.date_range(daily["date"].min(), daily["date"].max(), freq="D")})
+    full = full_dates.merge(daily, how="left")
+    full["posts"] = full["posts"].fillna(0).astype(int)
+    full[f"rolling_{rolling}d"] = full["posts"].rolling(rolling, min_periods=1).mean()
+    return full
+
+
+def trend_split(signals: pd.DataFrame, split: str | pd.Timestamp | None = None) -> dict:
+    """Average daily delay/disruption chatter before vs on/after a split date.
+
+    Without a split, uses the corpus midpoint. change_pct is the growth of the
+    later half vs the earlier half as a percentage; None when there is no early
+    chatter to compare against.
+    """
+    daily = delay_disruption_counts(signals)
+    if daily.empty or daily["posts"].sum() == 0:
+        return {}
+    split = pd.Timestamp(split) if split is not None else (daily["date"].min() + (daily["date"].max() - daily["date"].min()) / 2).normalize()
+    early = daily[daily["date"] < split]["posts"]
+    late = daily[daily["date"] >= split]["posts"]
+    early_daily = float(early.mean()) if len(early) else 0.0
+    late_daily = float(late.mean()) if len(late) else 0.0
+    return {
+        "split_date": split.date(),
+        "early_daily": early_daily,
+        "late_daily": late_daily,
+        "change_pct": ((late_daily / early_daily) - 1) * 100 if early_daily else None,
+        "total_posts": int(daily["posts"].sum()),
+    }
+
+
+def phrase_mentions(signals: pd.DataFrame, phrases: list[str]) -> pd.DataFrame:
+    """Posts whose text mentions any phrases, counted per category."""
+    empty = pd.DataFrame(columns=["category", "posts"])
+    if signals.empty or "text" not in signals.columns:
+        return empty
+    pattern = "|".join(re.escape(p.lower()) for p in phrases)
+    hits = signals[signals["text"].astype(str).str.lower().str.contains(pattern, na=False)]
+    if hits.empty:
+        return empty
+    return hits.groupby("category").size().rename("posts").reset_index().sort_values("posts", ascending=False)

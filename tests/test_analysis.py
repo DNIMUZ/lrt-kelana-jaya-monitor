@@ -6,9 +6,12 @@ import pytest
 
 from src.analysis.insights import (
     WEEKDAY_ORDER,
+    delay_disruption_counts,
     detect_ridership_anomalies,
+    phrase_mentions,
     ridge_forecast,
     signal_ridership_lag_correlation,
+    trend_split,
     weekday_seasonality,
 )
 from src.analysis.merged import daily_signal_counts, load_ridership_headline, merge_daily_panel
@@ -114,3 +117,34 @@ def test_ridership_loader_parses_gov_csv(tmp_path) -> None:
     frame = load_ridership_headline(path)
     assert len(frame) == 2
     assert frame["rail_lrt_kj"].dtype in (np.float64, np.int64)
+
+
+def test_delay_disruption_counts_rolling_window() -> None:
+    signals = _spread_signals(days=10, every=1)
+    trend = delay_disruption_counts(signals, rolling=3)
+    assert len(trend) == 10
+    assert int(trend["posts"].sum()) == 10
+    assert trend["rolling_3d"].iloc[-1] > 0
+    assert "rolling_3d" in trend.columns
+
+
+def test_trend_split_reports_growth() -> None:
+    signals = _spread_signals(days=6, every=1)
+    split = trend_split(signals, split="2026-08-03")
+    assert split["early_daily"] == 1.0
+    assert split["late_daily"] == 1.0
+    assert split["change_pct"] == 0.0
+    assert split["total_posts"] == 6
+
+
+def test_phrase_mentions_counts_by_category() -> None:
+    signals = pd.DataFrame(
+        [
+            {"text": "lrt sesak gila masa shah alam crowd", "category": "crowding", "observed_at": "2026-08-01T00:00:00+00:00"},
+            {"text": "naik lrt3 malam ni", "category": "other", "observed_at": "2026-08-02T00:00:00+00:00"},
+            {"text": "cuaca panas hari ini", "category": "other", "observed_at": "2026-08-03T00:00:00+00:00"},
+        ]
+    )
+    mentions = phrase_mentions(signals, ["shah ala", "lrt3"])
+    assert mentions.set_index("category")["posts"].to_dict() == {"crowding": 1, "other": 1}
+    assert phrase_mentions(signals, ["monorail"]).empty

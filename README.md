@@ -120,7 +120,11 @@ Tabs:
    low ridership days (holidays, MCO, disruptions).
 3. **Social Signals** - daily posts by category, most-mentioned stations, most
    active authors, sample text.
-4. **Correlation & Forecast** - lagged Pearson correlation of disruption chatter
+4. **Why delays? & Shah Alam** - tests the "Shah Alam line launch caused KJ
+   overcrowding" theory against the data (KJ June vs July 2026 vs July 2025,
+   Shah Alam line ramp-up, maintenance/signalling mentions in the Sep 2026
+   delay spike).
+5. **Correlation & Forecast** - lagged Pearson correlation of disruption chatter
    vs ridership, same-day scatter, and a weekday-driven ridge forecast with
    holdout MAE / MAPE / R².
 
