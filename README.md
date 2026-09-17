@@ -211,41 +211,42 @@ renders, and anything committed to the GitHub repo it builds from is public.
 This project ships **two data modes** so you can publish the dashboard without
 publishing the corpus:
 
-- **Full mode (locally):** reads the private SQLite store
-  (`data/lrt_monitor.db`). Post texts, author identities and the Apify token
-  never leave your machine.
-- **Public mode (deployed):** the app auto-detects that the database file is
-  not present and switches to lightweight, committed aggregates in
-  `data/published/` - daily category counts, station mentions and incident
-  timestamps. No post text, no author IDs, no token.
+- **Full mode (you only):** reads the private SQLite store
+  (`data/lrt_monitor.db`) or, on your other devices, the full corpus in Supabase
+  (`SUPABASE_DATABASE_URL`). Post texts and author identities are rendered only
+  here.
+- **Public mode (anyone on the URL):** renders daily category counts, hotspots
+  and incident timestamps **only**. In the deployed app these are fetched live
+  from Supabase as SQL aggregates (`count(*)`, `count(distinct author_id)`,
+  station groups) - the post text and author columns are **never selected or
+  transmitted**, so they can't be rendered even by accident.
 
 Files that stay private (all git-ignored): `*.db`, `.env`,
 `.streamlit/secrets.toml`, `data/processed/*`.
 
-### Steps to publish
+### Steps to publish (F1 setup)
 
-1. **Generate the public aggregates** (do this whenever you scrape new data):
-   ```powershell
-   py -m src.analysis.export_public
-   git add data/published
-   git commit -m "data: refresh public aggregates"
-   git push
-   ```
-2. Push the app to GitHub and open a Pull Request to `main`. Community Cloud
+1. Push the app to GitHub and open a Pull Request to `main`. Community Cloud
    builds from the repo's default branch, so merge the PR first.
-3. Go to https://share.streamlit.io -> **Create app** -> pick the repo
+2. Go to https://share.streamlit.io -> **Create app** -> pick the repo
    (`DNIMUZ/lrt-kelana-jaya-monitor`) -> Main file: `dashboard/insights_app.py`.
-4. Advanced settings: Python version **3.12**. No secrets are required - the
-   deployment deliberately runs without the Apify token or the database.
-5. Deploy. The app opens in **public mode** (sidebar shows the privacy banner).
-   Anyone with the URL can see it; the underlying post corpus stays private.
+3. **Settings -> Secrets** add the same two values you use in `.env`:
+   ```toml
+   SUPABASE_DATABASE_URL = "postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres"
+   INSIGHTS_DATASET = "public"   # don't touch this - forces the privacy-safe build
+   ```
+   Python version stays **3.12**.
+4. Deploy. The app opens in **public mode** and pulls live aggregates from
+   Supabase; if Supabase is unreachable it falls back to the committed
+   `data/published/` files (sidebar announces which source is active).
 
-To regenerate/refresh insights on the live app, repeat step 1 and redeploy.
+Refresh the data: scraped more posts? Just `push` them to Supabase - the live
+app picks up new aggregate numbers on its next load. No redeploy needed.
 
 **Optional alternative:** keep the GitHub repo **private** and still host on
-Community Cloud (you grant repo access during app setup). That lets you commit
-almost anything - but remember the deployed app URL itself remains publicly
-shareable, so public mode is still the safe default.
+Community Cloud (you grant repo access during app setup). The deployed URL is
+still public to anyone with the link, so `INSIGHTS_DATASET=public` remains the
+safe default either way.
 
 ## Data quality: how good posts are separated from bad
 

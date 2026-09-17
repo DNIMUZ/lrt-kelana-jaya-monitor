@@ -39,7 +39,12 @@ from src.analysis.merged import (
     malaysia_date,
     merge_daily_panel,
 )
-from src.analysis.supabase_sync import fetch_signals, supabase_creds
+from src.analysis.supabase_sync import (
+    fetch_public_daily_counts,
+    fetch_public_signals,
+    fetch_signals,
+    supabase_creds,
+)
 
 ROOT = Path(__file__).parents[1]
 DEFAULT_DB = ROOT / "data" / "lrt_monitor.db"
@@ -114,15 +119,21 @@ def load_data(ridership_path: str, db_path: str | None):
         panel = merge_daily_panel(signals, ridership)
         counts = daily_signal_counts(signals)
         return signals, ridership, panel, counts, False, "supabase"
-    if not summary_exists(PUBLIC_DIR):
-        raise FileNotFoundError(
-            "No signal data available. Run `python -m src.analysis.export_public` locally to generate the "
-            "privacy-safe aggregates, then deploy again."
-        )
-    signals = load_public_signals(PUBLIC_DIR)
-    counts = load_public_daily_counts(PUBLIC_DIR)
+    signals = fetch_public_signals()
+    counts = fetch_public_daily_counts()
+    if signals is None or counts is None:
+        if not summary_exists(PUBLIC_DIR):
+            raise FileNotFoundError(
+                "No signal data available. Run `python -m src.analysis.export_public` locally, or set "
+                "SUPABASE_DATABASE_URL in Streamlit secrets."
+            )
+        signals = load_public_signals(PUBLIC_DIR)
+        counts = load_public_daily_counts(PUBLIC_DIR)
+        source_label = "public (published aggregates)"
+    else:
+        source_label = "public (Supabase live)"
     panel = merge_daily_panel(signals, ridership)
-    return signals, ridership, panel, counts, True, "public"
+    return signals, ridership, panel, counts, True, source_label
 
 
 signals, ridership, panel, counts, public_mode, source_label = load_data(ridership_path, db_path)

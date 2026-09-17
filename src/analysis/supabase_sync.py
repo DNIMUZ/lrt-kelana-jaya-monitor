@@ -54,9 +54,22 @@ def _require_ssl(parsed: Any) -> ssl.SSLContext | None:
     return ssl._create_unverified_context()
 
 
+def _dsn() -> str:
+    """Connection string from Streamlit secrets first, then .env (F1-style)."""
+    try:
+        import streamlit as st
+
+        url = st.secrets.get("SUPABASE_DATABASE_URL")
+        if url:
+            return url.strip()
+    except Exception:
+        pass
+    return os.getenv("SUPABASE_DATABASE_URL", "").strip()
+
+
 def supabase_creds() -> dict[str, Any] | None:
-    """Parse SUPABASE_DATABASE_URL (Postgres connection URI) into connect kwargs."""
-    url = os.getenv("SUPABASE_DATABASE_URL", "").strip()
+    """Parse the Postgres connection URI into connect kwargs."""
+    url = _dsn()
     if not url:
         return None
     parsed = urlparse(url)
@@ -179,7 +192,7 @@ def push_signals(signals: pd.DataFrame, chunk_size: int = 400) -> int:
 
 
 def fetch_signals() -> pd.DataFrame:
-    """Download every signal from Supabase, oldest first."""
+    """Download every signal from Supabase, oldest first (full mode)."""
     connection = _connect()
     rows: list[dict[str, Any]] = []
     try:
@@ -203,6 +216,76 @@ def fetch_signals() -> pd.DataFrame:
     frame = rows_to_dataframe(rows)
     frame["observed_at"] = pd.to_datetime(frame["observed_at"], errors="coerce", format="mixed", utc=True)
     return frame
+
+
+def fetch_public_signals() -> pd.DataFrame | None:
+    """Privacy-safe public frame: timestamps/categories/stations only (no text, no authors)."""
+    try:
+        connection = _connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT observed_at, category, station FROM public.{SIGNALS_TABLE} "
+                    f"WHERE category IN ('crowding', 'delay', 'disruption') ORDER BY observed_at"
+                )
+                records = cursor.fetchall()
+        finally:
+            connection.close()
+    except Exception:
+        return None
+    if not records:
+        return pd.DataFrame(columns=["text", "category", "station", "author_id", "observed_at"])
+    frame = pd.DataFrame(records, columns=["observed_at", "category", "station"])
+    frame["text"] = ""
+    frame["author_id"] = None
+    return frame[["text", "category", "station", "author_id", "observed_at"]]
+
+
+def fetch_public_daily_counts() -> pd.DataFrame | None:
+    """Daily category counts + unique authors, computed inside Postgres (authors never leave the DB)."""
+    try:
+        connection = _connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT (observed_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date AS date,
+                           category, count(*) AS posts
+                    FROM public.{SIGNALS_TABLE}
+                    GROUP BY 1, 2
+                    """
+                )
+                category_rows = cursor.fetchall()
+                cursor.execute(
+                    f"""
+                    SELECT (observed_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date AS date,
+                           count(DISTINCT author_id) AS unique_authors
+                    FROM public.{SIGNALS_TABLE}
+                    GROUP BY 1
+                    """
+                )
+                author_rows = cursor.fetchall()
+        finally:
+            connection.close()
+    except Exception:
+        return None
+    empty = pd.DataFrame(columns=["date", "total", "unique_authors", "normal", "crowding", "delay", "disruption", "other"])
+    if not category_rows:
+        return empty
+    pivoted = pd.DataFrame(category_rows, columns=["date", "category", "posts"]).pivot_table(
+        index="date", columns="category", values="posts", aggfunc="sum", fill_value=0
+    )
+    authors = pd.DataFrame(author_rows, columns=["date", "unique_authors"])
+    result = pivoted.rename_axis(columns=None).reset_index().merge(authors, on="date", how="left")
+    result["unique_authors"] = result["unique_authors"].fillna(0).astype(int)
+    result["total"] = result[
+        [column for column in result.columns if column not in ("date", "unique_authors")]
+    ].sum(axis=1)
+    for name in ("normal", "crowding", "delay", "disruption", "other"):
+        if name not in result.columns:
+            result[name] = 0
+    result["date"] = pd.to_datetime(result["date"])
+    return result[["date", "total", "unique_authors", "normal", "crowding", "delay", "disruption", "other"]].sort_values("date")
 
 
 def _naive_utc(value: str) -> datetime:

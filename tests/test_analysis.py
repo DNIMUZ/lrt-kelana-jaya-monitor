@@ -20,6 +20,8 @@ from src.analysis.merged import daily_signal_counts, load_ridership_headline, me
 from src.analysis.supabase_sync import (
     _naive_utc,
     dedupe_key,
+    fetch_public_daily_counts,
+    fetch_public_signals,
     push_signals,
     rows_from_signals,
     rows_to_dataframe,
@@ -295,3 +297,75 @@ def test_supabase_creds_parses_encoded_password(monkeypatch) -> None:
 def test_naive_utc_handles_z_and_offset() -> None:
     assert _naive_utc("2026-09-01T00:30:00Z") == pd.Timestamp("2026-09-01T00:30:00").to_pydatetime()
     assert _naive_utc("2026-09-01T00:30:00+08:00") == pd.Timestamp("2026-08-31T16:30:00").to_pydatetime()
+
+
+class _FakeResultCursor(_FakeCursor):
+    def __init__(self, results: list[list[tuple]]) -> None:
+        super().__init__()
+        self._results = results
+        self._index = 0
+
+    def fetchall(self) -> list[tuple]:
+        rows = self._results[self._index]
+        self._index += 1
+        return rows
+
+
+class _FakeResultConnection(_FakeConnection):
+    def __init__(self, results: list[list[tuple]]) -> None:
+        self._cursor_obj = _FakeResultCursor(results)
+        super().__init__()
+
+    def cursor(self) -> _FakeResultCursor:
+        return self._cursor_obj
+
+
+def _patch_public_fetchers(monkeypatch, results: list[list[tuple]]) -> _FakeResultConnection:
+    new_conn = _FakeResultConnection(results)
+    monkeypatch.setattr("src.analysis.supabase_sync._connect", lambda: new_conn)
+    monkeypatch.setenv(
+        "SUPABASE_DATABASE_URL",
+        "postgresql://postgres.x:pw@host:5432/postgres",
+    )
+    return new_conn
+
+
+def test_fetch_public_signals_never_exposes_text_or_authors(monkeypatch) -> None:
+    conn = _patch_public_fetchers(
+        monkeypatch,
+        [[(pd.Timestamp("2026-01-01T00:30:00+00:00"), "crowding", "KJ24"), (pd.Timestamp("2026-01-02T01:00:00+00:00"), "delay", None)]],
+    )
+    frame = fetch_public_signals()
+    assert frame["text"].eq("").all()
+    assert frame["author_id"].isna().all()
+    assert set(frame.columns) == {"text", "category", "station", "author_id", "observed_at"}
+    assert frame["category"].tolist() == ["crowding", "delay"]
+
+
+def test_fetch_public_daily_counts_groups_by_my_date(monkeypatch) -> None:
+    conn = _patch_public_fetchers(
+        monkeypatch,
+        [
+            [
+                (pd.Timestamp("2026-01-01T00:30:00+08:00").date(), "crowding", 1),
+                (pd.Timestamp("2026-01-01T00:30:00+08:00").date(), "other", 2),
+            ],
+            [(pd.Timestamp("2026-01-01T00:30:00+08:00").date(), 3)],
+        ],
+    )
+    counts = fetch_public_daily_counts()
+    assert not counts.empty
+    row = counts.iloc[0]
+    assert row["crowding"] == 1 and row["other"] == 2
+    assert row["total"] == 3
+    assert {c in row.index for c in ("normal", "delay", "disruption")} == {True}
+
+
+def test_public_fetchers_fall_back_to_none_on_failure(monkeypatch) -> None:
+    def boom() -> object:
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr("src.analysis.supabase_sync._connect", boom)
+    monkeypatch.setenv("SUPABASE_DATABASE_URL", "postgresql://postgres.x:pw@host:5432/postgres")
+    assert fetch_public_signals() is None
+    assert fetch_public_daily_counts() is None
