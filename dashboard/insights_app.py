@@ -39,6 +39,7 @@ from src.analysis.merged import (
     malaysia_date,
     merge_daily_panel,
 )
+from src.analysis.supabase_sync import fetch_signals, supabase_creds
 
 ROOT = Path(__file__).parents[1]
 DEFAULT_DB = ROOT / "data" / "lrt_monitor.db"
@@ -76,8 +77,15 @@ with st.sidebar:
     st.header("Data sources")
     ridership_path = st.text_input("Gov ridership CSV (daily)", value=str(DEFAULT_RIDERSHIP))
     full_db = (not FORCE_PUBLIC) and Path(DEFAULT_DB).exists()
+    remote_db = (not FORCE_PUBLIC) and (not full_db) and bool(supabase_creds())
     if full_db:
         db_path = st.text_input("Signals SQLite DB", value=str(DEFAULT_DB), help="Full private dataset: post texts + author IDs from your local SQLite store.")
+    elif remote_db:
+        db_path = None
+        st.info(
+            "**Full mode via Supabase**: latest scrape is loaded from your private Supabase project. "
+            "Texts and author IDs never leave your devices."
+        )
     else:
         db_path = ""
         st.info(
@@ -94,26 +102,30 @@ with st.sidebar:
 
 
 @st.cache_data(show_spinner=False)
-def load_data(ridership_path: str, db_path: str):
+def load_data(ridership_path: str, db_path: str | None):
     ridership = load_ridership_headline(ridership_path)
-    use_public = bool(not db_path) or not Path(DEFAULT_DB).exists()
-    if use_public:
-        if not summary_exists(PUBLIC_DIR):
-            raise FileNotFoundError(
-                "No signal data available. Run `python -m src.analysis.export_public` locally to generate the "
-                "privacy-safe aggregates, then deploy again."
-            )
-        signals = load_public_signals(PUBLIC_DIR)
-        counts = load_public_daily_counts(PUBLIC_DIR)
+    if db_path:
+        signals = load_signals_dataframe(db_path)
         panel = merge_daily_panel(signals, ridership)
-        return signals, ridership, panel, counts, True
-    signals = load_signals_dataframe(db_path)
+        counts = daily_signal_counts(signals)
+        return signals, ridership, panel, counts, False, "local"
+    if remote_db:
+        signals = fetch_signals()
+        panel = merge_daily_panel(signals, ridership)
+        counts = daily_signal_counts(signals)
+        return signals, ridership, panel, counts, False, "supabase"
+    if not summary_exists(PUBLIC_DIR):
+        raise FileNotFoundError(
+            "No signal data available. Run `python -m src.analysis.export_public` locally to generate the "
+            "privacy-safe aggregates, then deploy again."
+        )
+    signals = load_public_signals(PUBLIC_DIR)
+    counts = load_public_daily_counts(PUBLIC_DIR)
     panel = merge_daily_panel(signals, ridership)
-    counts = daily_signal_counts(signals)
-    return signals, ridership, panel, counts, False
+    return signals, ridership, panel, counts, True, "public"
 
 
-signals, ridership, panel, counts, public_mode = load_data(ridership_path, db_path)
+signals, ridership, panel, counts, public_mode, source_label = load_data(ridership_path, db_path)
 latest_ridership = panel["date"].max()
 kj = panel.dropna(subset=["ridership"])
 

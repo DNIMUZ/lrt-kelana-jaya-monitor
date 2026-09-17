@@ -17,6 +17,13 @@ from src.analysis.insights import (
     weekday_seasonality,
 )
 from src.analysis.merged import daily_signal_counts, load_ridership_headline, merge_daily_panel
+from src.analysis.supabase_sync import (
+    _naive_utc,
+    dedupe_key,
+    push_signals,
+    rows_from_signals,
+    rows_to_dataframe,
+)
 
 
 def _synthetic_signals() -> pd.DataFrame:
@@ -196,3 +203,49 @@ def test_public_export_strips_text_and_authors(tmp_path) -> None:
     assert len(loaded) == len(signals[signals["category"].isin(["crowding", "delay", "disruption"])])
     assert loaded["text"].eq("").all()
     assert loaded["author_id"].isna().all()
+
+
+def test_dedupe_key_is_stable_and_case_insensitive() -> None:
+    assert dedupe_key("UserA", "LRT SESAK") == dedupe_key("usera", "lrt sesak")
+    assert dedupe_key("UserA", "LRT SESAK") != dedupe_key("UserA", "lrt sesak juga")
+    assert len(dedupe_key(None, "text")) == 40
+
+
+def test_rows_from_signals_dedupeable_and_roundtrips() -> None:
+    signals = _synthetic_signals()
+    rows = rows_from_signals(signals)
+    assert len(rows) == len(signals)
+    assert {col in rows[0] for col in ("dedupe_key", "text", "category", "station", "author_id", "observed_at")} == {True}
+    keys = [row["dedupe_key"] for row in rows]
+    assert len(keys) == len(set(keys))
+    restored = rows_to_dataframe(rows)
+    assert set(restored.columns) == {"text", "category", "station", "author_id", "observed_at"}
+    assert restored["text"].tolist() == signals["text"].tolist()
+
+
+def test_push_signals_batches_and_deduplicates(monkeypatch) -> None:
+    captured: list[dict] = []
+    import requests
+
+    def fake_post(url, params=None, headers=None, json=None, timeout=None):
+        assert params.get("on_conflict") == "dedupe_key"
+        assert "signals" in url
+        assert headers["Prefer"].startswith("resolution=merge-duplicates")
+        captured.append({"url": url, "payload": json})
+        return type("R", (), {"raise_for_status": lambda self: None})()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_KEY", "service-key")
+
+    signals = pd.concat([_synthetic_signals(), _synthetic_signals()], ignore_index=True)
+    pushed = push_signals(signals, chunk_size=100)
+    assert pushed == len(signals)
+    assert len(captured) == 1
+    deduped = {row["dedupe_key"] for batch in captured for row in batch["payload"]}
+    assert len(deduped) == 4  # not 8: same dedupe_key sent once thanks to dedupe_key identity
+
+
+def test_naive_utc_handles_z_and_offset() -> None:
+    assert _naive_utc("2026-09-01T00:30:00Z") == pd.Timestamp("2026-09-01T00:30:00").to_pydatetime()
+    assert _naive_utc("2026-09-01T00:30:00+08:00") == pd.Timestamp("2026-08-31T16:30:00").to_pydatetime()

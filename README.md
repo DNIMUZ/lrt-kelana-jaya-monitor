@@ -168,6 +168,43 @@ catalogue (source: anonymous tap-in/out transaction data) and is published
 ~6-8 weeks behind, so the correlation view fills in automatically once the
 series catches up to the Threads window.
 
+## Syncing the full dataset across your devices (Supabase)
+
+Keep the repository public and *still* carry the full corpus (texts + authors)
+between your own devices without ever committing it. The app already knows how:
+sidebar shows **"Full mode via Supabase"** whenever it finds
+`SUPABASE_URL` / `SUPABASE_KEY` in `.env` and no local database file.
+
+1. Create a **free** project at https://supabase.com. Copy the **Project URL**
+   and the **service_role key** (Settings -> API keys).
+2. Put them in `.env` (this file is git-ignored - never commit the key):
+   ```dotenv
+   SUPABASE_URL=https://YOURPROJECT.supabase.co
+   SUPABASE_KEY=YOUR_SERVICE_ROLE_KEY
+   ```
+3. Create the table once:
+   ```powershell
+   py -m src.analysis.supabase_sync init
+   ```
+   Paste the printed SQL into the Supabase **SQL editor** and run it (table +
+   row-level security so the anon key gets nothing).
+4. Upload your local corpus (idempotent - safe to rerun after any new scrape):
+   ```powershell
+   py -m src.analysis.supabase_sync push
+   ```
+5. On **another device**: clone the repo, `py -m pip install -r requirements.txt`,
+   repeat step 2 (same `.env`), and run the dashboard - it loads full-mode
+   straight from Supabase, no database file needed:
+   ```powershell
+   .\.venv\Scripts\python.exe -m streamlit run dashboard\insights_app.py
+   ```
+   Optional: restore a local SQLite copy with `py -m src.analysis.supabase_sync pull`.
+
+> Safety rule: the deployed dashboard must keep running in **public mode** (set
+> `INSIGHTS_DATASET=public` in Streamlit's app settings). If you pushed the
+> Supabase key into Streamlit **secrets**, the live app would render the full
+> corpus publicly to anyone with the URL - do not do this.
+
 ## Publishing to Streamlit Community Cloud (privacy-first)
 
 Anyone who visits a deployed Streamlit app can see exactly what your code
