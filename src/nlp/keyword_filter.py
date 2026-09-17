@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-_LRT_TERMS = ("lrt", "rapid kl", "rapidkl", "kelana jaya", "lrt kj")
+_LRT_TERMS = ("lrt", "rapid kl", "rapidkl", "kelana jaya", "lrt kj", "kuala kaya")
 
 
 def is_lrt_related(text: str) -> bool:
