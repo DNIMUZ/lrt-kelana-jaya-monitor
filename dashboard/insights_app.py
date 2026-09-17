@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -25,6 +26,12 @@ from src.analysis.insights import (
     trend_split,
     weekday_seasonality,
 )
+from src.analysis.export_public import (
+    PUBLIC_DIR,
+    load_public_daily_counts,
+    load_public_signals,
+    summary_exists,
+)
 from src.analysis.merged import (
     daily_signal_counts,
     load_ridership_headline,
@@ -32,10 +39,17 @@ from src.analysis.merged import (
     malaysia_date,
     merge_daily_panel,
 )
+from src.analysis.supabase_sync import (
+    fetch_public_daily_counts,
+    fetch_public_signals,
+    fetch_signals,
+    supabase_creds,
+)
 
 ROOT = Path(__file__).parents[1]
 DEFAULT_DB = ROOT / "data" / "lrt_monitor.db"
 DEFAULT_RIDERSHIP = ROOT / "data" / "ridership_headline.csv"
+FORCE_PUBLIC = os.getenv("INSIGHTS_DATASET", "").casefold() == "public"
 RIDERSHIP_LABEL = "rail_lrt_kj ridership"
 
 st.set_page_config(page_title="LRT Kelana Jaya | Insights", page_icon="LRT", layout="wide")
@@ -67,27 +81,84 @@ Two honest caveats:
 with st.sidebar:
     st.header("Data sources")
     ridership_path = st.text_input("Gov ridership CSV (daily)", value=str(DEFAULT_RIDERSHIP))
-    db_path = st.text_input("Signals SQLite DB", value=str(DEFAULT_DB))
+    full_db = (not FORCE_PUBLIC) and Path(DEFAULT_DB).exists()
+    remote_db = (not FORCE_PUBLIC) and (not full_db) and bool(supabase_creds())
+    if full_db:
+        db_path = st.text_input("Signals SQLite DB", value=str(DEFAULT_DB), help="Full private dataset: post texts + author IDs from your local SQLite store.")
+    elif remote_db:
+        db_path = None
+        st.info(
+            "**Full mode via Supabase**: latest scrape is loaded from your private Supabase project. "
+            "Texts and author IDs never leave your devices."
+        )
+    else:
+        db_path = ""
+        st.info(
+            "**Privacy-safe public build**: this deployment reads only lightweight aggregates from "
+            "`data/published/` - daily category counts, station mentions and incident timestamps. "
+            "Post texts and author identities are never included."
+        )
     allowed = st.multiselect(
         "Ridership series to compare",
         ["rail_lrt_kj", "rail_lrt_ampang", "rail_mrt_kajang", "rail_mrt_pjy", "rail_lrt_shah_alam", "rail_monorail"],
         default=["rail_lrt_kj"],
-        help="Monitor compares all against signal/history; focus stays on rail_lrt_kj.",
+        help="Add extra rail lines to include them in the Overview comparison table. The analysis always focuses on rail_lrt_kj; other lines are context only.",
     )
 
 
 @st.cache_data(show_spinner=False)
-def load_data(ridership_path: str, db_path: str):
-    signals = load_signals_dataframe(db_path)
+def load_data(ridership_path: str, db_path: str | None):
     ridership = load_ridership_headline(ridership_path)
+    if db_path:
+        signals = load_signals_dataframe(db_path)
+        panel = merge_daily_panel(signals, ridership)
+        counts = daily_signal_counts(signals)
+        return signals, ridership, panel, counts, False, "local"
+    if remote_db:
+        signals = fetch_signals()
+        panel = merge_daily_panel(signals, ridership)
+        counts = daily_signal_counts(signals)
+        return signals, ridership, panel, counts, False, "supabase"
+    signals = fetch_public_signals()
+    counts = fetch_public_daily_counts()
+    if signals is None or counts is None:
+        if not summary_exists(PUBLIC_DIR):
+            raise FileNotFoundError(
+                "No signal data available. Run `python -m src.analysis.export_public` locally, or set "
+                "SUPABASE_DATABASE_URL in Streamlit secrets."
+            )
+        signals = load_public_signals(PUBLIC_DIR)
+        counts = load_public_daily_counts(PUBLIC_DIR)
+        source_label = "public (published aggregates)"
+    else:
+        source_label = "public (Supabase live)"
     panel = merge_daily_panel(signals, ridership)
-    counts = daily_signal_counts(signals)
-    return signals, ridership, panel, counts
+    return signals, ridership, panel, counts, True, source_label
 
 
-signals, ridership, panel, counts = load_data(ridership_path, db_path)
+signals, ridership, panel, counts, public_mode, source_label = load_data(ridership_path, db_path)
 latest_ridership = panel["date"].max()
 kj = panel.dropna(subset=["ridership"])
+
+if public_mode:
+    st.info(
+        "**Public (aggregated) build.** Post texts and author identities are kept private; this view exposes the "
+        "same patterns - daily category counts, hotspots, seasonality, correlation and forecast."
+    )
+
+if not kj.empty:
+    ridership_as_of = kj["date"].max().date()
+else:
+    ridership_as_of = None
+if not counts.empty:
+    signals_as_of = counts["date"].max().date()
+else:
+    signals_as_of = None
+st.info(
+    f"**Data recency:** official ridership is published through **{ridership_as_of}** "
+    f"and Threads signals through **{signals_as_of}**. The government's daily figures "
+    f"arrive ~6-8 weeks late, so anything comparing recent weeks is provisional."
+)
 
 if signals.empty:
     st.warning("No signals in the database. Run `python -m src.collectors.threads_bulk` or `threads_scraper` first.")
@@ -99,17 +170,57 @@ overview_tab, season_tab, social_tab, delay_tab, correlation_tab = st.tabs(
 with overview_tab:
     st.subheader("Rail Kelana Jaya - headline indicators")
     this_year = kj[kj["date"].dt.year == 2026]
-    last_year = kj[kj["date"].dt.year == 2025]
+    last_year = kj[(kj["date"].dt.year == 2025) & (kj["date"] <= this_year["date"].max().replace(year=2025))] if not this_year.empty else kj.loc[[]]
     top, kpi_a, kpi_b, kpi_c, kpi_d = st.columns([1, 1, 1, 1, 1])
     top.markdown("**Averages (2026 to date)**")
     kpi_a.metric("Avg daily ridership", f"{this_year['ridership'].mean():,.0f}")
-    kpi_b.metric(
-        "Vs same period 2025",
-        f"{(this_year['ridership'].mean() / last_year['ridership'].mean() - 1) * 100:.1f}%",
-        delta_color="inverse",
-    )
+    if not last_year.empty:
+        kpi_b.metric(
+            "Vs same period 2025",
+            f"{(this_year['ridership'].mean() / last_year['ridership'].mean() - 1) * 100:.1f}%",
+            delta_color="inverse",
+            help=f"Same-day-of-year window: 2026 through {this_year['date'].max().date()} vs 2025 through {last_year['date'].max().date()}.",
+        )
+    else:
+        kpi_b.metric("Vs same period 2025", "n/a")
     kpi_c.metric("Peak day 2026", f"{this_year['ridership'].max():,.0f}")
     kpi_d.metric("Busiest weekday", weekday_seasonality(kj).sort_values("average", ascending=False).iloc[0]["weekday"])
+
+    recent = kj.dropna(subset=["ridership"]).tail(7)
+    prior = kj.dropna(subset=["ridership"]).tail(14).head(7)
+    if len(recent) >= 7 and len(prior) >= 7:
+        r_a, r_b, r_c = st.columns(3)
+        r_a.metric("Latest week avg ridership", f"{recent['ridership'].mean():,.0f}",
+                   help=f"Trailing 7 official ridership days ending {recent['date'].max().date()}.")
+        r_b.metric("Prior week avg", f"{prior['ridership'].mean():,.0f}")
+        r_c.metric("Week-over-week", f"{(recent['ridership'].mean() / prior['ridership'].mean() - 1) * 100:+.1f}%")
+        st.caption("Official ridership lags ~6-8 weeks - this is the latest *published* week, not this calendar week.")
+
+    compared = []
+    for series in allowed:
+        if series not in ridership.columns:
+            continue
+        sub = ridership.dropna(subset=[series]).copy()
+        sub_this = sub[sub["date"].dt.year == 2026]
+        if sub_this.empty:
+            continue
+        sub_cutoff = sub_this["date"].max().replace(year=2025)
+        sub_last = sub[(sub["date"].dt.year == 2025) & (sub["date"] <= sub_cutoff)]
+        if sub_last.empty:
+            continue
+        compared.append({
+            "series": series,
+            "this_year_avg": sub_this[series].mean(),
+            "last_year_avg": sub_last[series].mean(),
+        })
+    if len(compared) > 1:
+        comp_df = pd.DataFrame(compared)
+        comp_df["vs same period 2025"] = ((comp_df["this_year_avg"] / comp_df["last_year_avg"] - 1) * 100).round(1).astype(str) + "%"
+        comp_df["2026 avg/day"] = comp_df["this_year_avg"].round(0).astype(int)
+        comp_df["2025 avg/day"] = comp_df["last_year_avg"].round(0).astype(int)
+        st.write("**Cross-line comparison - same period as KJ 2026 (choose extra lines in the sidebar to show them)**")
+        for _, row in comp_df.iterrows():
+            st.markdown(f"- **{row['series']}**: {row['2026 avg/day']:,} avg/day vs {row['2025 avg/day']:,} ({row['vs same period 2025']})")
 
     chart = alt.Chart(kj).mark_line().encode(
         x=alt.X("date:T", title="Date"),
@@ -136,35 +247,49 @@ with overview_tab:
 with season_tab:
     st.subheader("Seasonality & anomaly days")
     anomalies = detect_ridership_anomalies(kj)
-    anomalous_days = anomalies[anomalies["anomalous"]]
-    st.metric("Unusually-low ridership days detected", len(anomalous_days))
-    amount = kj["ridership"].mean() if len(kj) else 0
-    if not anomalous_days.empty:
-        low_col, sample_col = st.columns([1, 2])
-        with low_col:
-            st.write("**Days flagged (z-score below -2 vs 28-day trend)**")
-            st.dataframe(
-                anomalous_days[["date", "ridership", "baseline", "z_score", "disruption"]]
-                .sort_values("z_score")
-                .reset_index(drop=True),
-                hide_index=True,
-                width="stretch",
-            )
-        with sample_col:
-            annotated = alt.Chart(anomalous_days).mark_circle(size=80).encode(
-                x=alt.X("date:T"),
-                y=alt.Y("ridership:Q"),
-                color="z_score:Q",
-                tooltip=["date", "ridership", "z_score", "disruption"],
-            )
-            trend = alt.Chart(kj).mark_line(opacity=0.4).encode(x="date:T", y="baseline:Q")
-            st.altair_chart((trend + annotated).properties(height=320), width="stretch")
-        st.info(
-            f"Detected {len(anomalous_days)} low-demand days ({len(anomalous_days) / max(len(kj), 1):.1%} of all days). "
-            f"Hover the annotated chart to see coinciding social chatter. Typical cause: public holidays and long weekends."
-        )
+    if kj.empty:
+        st.write("No ridership data available.")
     else:
-        st.write("No unusual days found in the current window.")
+        trailing = kj["date"].max() - pd.Timedelta(days=365)
+        recent_anomalies = anomalies[anomalies["date"] >= trailing]
+        anomalous_days = recent_anomalies[recent_anomalies["anomalous"]]
+        mco_days = int(
+            anomalies[anomalies["anomalous"] & (anomalies["date"] >= "2020-03-01") & (anomalies["date"] <= "2022-03-31")].shape[0]
+        )
+        last90 = int(anomalous_days[anomalous_days["date"] >= (kj["date"].max() - pd.Timedelta(days=90))].shape[0])
+        st.metric(
+            "Unusually-low days (last 12 months)",
+            len(anomalous_days),
+            delta=f"{last90} in last 90 days",
+            help=f"Flagged vs the 28-day centered baseline, z-score below -2, over the trailing 12 months ending {kj['date'].max().date()}. MCO-era dips (2020-2022, {mco_days} days) are excluded from this window.",
+        )
+        if not anomalous_days.empty:
+            low_col, sample_col = st.columns([1, 2])
+            with low_col:
+                st.write("**Days flagged (z-score below -2 vs 28-day trend, last 12 months)**")
+                st.dataframe(
+                    anomalous_days[["date", "ridership", "baseline", "z_score", "disruption"]]
+                    .sort_values("z_score")
+                    .reset_index(drop=True),
+                    hide_index=True,
+                    width="stretch",
+                )
+            with sample_col:
+                annotated = alt.Chart(anomalous_days).mark_circle(size=80).encode(
+                    x=alt.X("date:T"),
+                    y=alt.Y("ridership:Q"),
+                    color="z_score:Q",
+                    tooltip=["date", "ridership", "z_score", "disruption"],
+                )
+                trend = alt.Chart(kj[kj["date"] >= trailing]).mark_line(opacity=0.4).encode(x="date:T", y="baseline:Q")
+                st.altair_chart((trend + annotated).properties(height=320), width="stretch")
+            st.info(
+                f"Detected **{len(anomalous_days)} low-demand days in the last 12 months**. "
+                f"Hover the annotated chart to see coinciding social chatter. Typical cause: public holidays and long weekends. "
+                f"The full-history run also flags {mco_days} MCO-era days (2020-2022), which are outside this window."
+            )
+        else:
+            st.write("No unusual days found in the trailing 12 months.")
     monthly = panel.dropna(subset=["ridership"]).groupby(["year", "month"])["ridership"].mean().reset_index()
     heat = (
         alt.Chart(monthly)
@@ -237,14 +362,17 @@ with social_tab:
                     width="stretch",
                 )
 
-        st.subheader("Sample signal text")
-        st.dataframe(
-            signals.sort_values("observed_at", ascending=False)[["observed_at", "category", "station", "text"]].head(25).reset_index(
-                drop=True
-            ),
-            hide_index=True,
-            width="stretch",
-        )
+        if not public_mode:
+            st.subheader("Sample signal text")
+            st.dataframe(
+                signals.sort_values("observed_at", ascending=False)[["observed_at", "category", "station", "text"]].head(25).reset_index(
+                    drop=True
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+        else:
+            st.caption("Full post listings are excluded from the public build to protect author privacy.")
 
 
 with delay_tab:
@@ -425,16 +553,24 @@ with delay_tab:
     spike_recent = spike[pd.to_datetime(spike["date"]) >= pd.Timestamp("2026-09-10")]
     maint = 0
     fault = 0
-    if len(spike_recent):
+    if len(spike_recent) and not public_mode:
         maint = int(spike_recent["text"].astype(str).str.lower().str.contains("overhaul|naik taraf|peningkatan|kerja", na=False).sum())
         fault = int(spike_recent["text"].astype(str).str.lower().str.contains("semboyan|signall|isyarat|kejejas|gangguan sistem", na=False).sum())
     sa_links = int(sa_crowd["posts"].sum()) if not sa_crowd.empty else 0
-    st.markdown(
-        f"- **The delays are mostly maintenance & signalling - not transfers.** In the recent spike window "
-        f"(since 10 Sep), posts name **track overhaul / works** ({maint} posts) and **a signalling system fault** "
-        f"({fault} posts - Rapid KL itself issued a 'gangguan sistem semboyan' statement on 15 Sep). "
-        f"Only **{sa_links} post(s)** link crowding with Shah Alam or Putra Heights."
-    )
+    if public_mode:
+        st.markdown(
+            "- **Text-level attribution is hidden in the public build.** In the private full dataset, the recent "
+            "spike window names track-overhaul works and a signalling-system fault (Rapid KL statement, 15 Sep) "
+            "as the immediate causes - not the Shah Alam opening. Re-run the dashboard locally (or set "
+            "`INSIGHTS_DATASET=full`) to see the quoted counts."
+        )
+    else:
+        st.markdown(
+            f"- **The delays are mostly maintenance & signalling - not transfers.** In the recent spike window "
+            f"(since 10 Sep), posts name **track overhaul / works** ({maint} posts) and **a signalling system fault** "
+            f"({fault} posts - Rapid KL itself issued a 'gangguan sistem semboyan' statement on 15 Sep). "
+            f"Only **{sa_links} post(s)** link crowding with Shah Alam or Putra Heights."
+        )
     st.warning(
         "**Bottom line:** delay/disturbance chatter really did increase - but the current evidence points to the KJ "
         "line's own overhaul works and signalling faults, **not** the Shah Alam opening. The 'crowd transfer' theory is "

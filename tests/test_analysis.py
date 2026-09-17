@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.analysis.export_public import export_public_artifacts, load_public_daily_counts, load_public_signals
 from src.analysis.insights import (
     WEEKDAY_ORDER,
     delay_disruption_counts,
@@ -16,6 +17,16 @@ from src.analysis.insights import (
     weekday_seasonality,
 )
 from src.analysis.merged import daily_signal_counts, load_ridership_headline, merge_daily_panel
+from src.analysis.supabase_sync import (
+    _naive_utc,
+    dedupe_key,
+    fetch_public_daily_counts,
+    fetch_public_signals,
+    push_signals,
+    rows_from_signals,
+    rows_to_dataframe,
+    supabase_creds,
+)
 
 
 def _synthetic_signals() -> pd.DataFrame:
@@ -164,3 +175,197 @@ def test_incident_hour_distribution_buckets_by_local_time() -> None:
     assert buckets["Morning rush 6-9"] == 1
     assert buckets["Late morning 9-12"] == 1
     assert buckets["Night 19-24"] == 1
+
+
+def test_public_export_strips_text_and_authors(tmp_path) -> None:
+    signals = pd.concat(
+        [
+            _synthetic_signals(),
+            pd.DataFrame(
+                [
+                    {
+                        "text": "saya tulis rahsia ini",  # must never reach the public CSVs
+                        "category": "disruption",
+                        "station": "KJ9",
+                        "author_id": "secretuser",
+                        "observed_at": "2026-09-02T01:00:00+00:00",
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    artifacts = export_public_artifacts(signals, tmp_path)
+    incidents = pd.read_csv(artifacts["incidents_posts"])
+    assert "text" not in incidents.columns
+    assert "author_id" not in incidents.columns
+    assert "secret" not in "\n".join(incidents.astype(str).to_string().splitlines())
+    daily = load_public_daily_counts(tmp_path)
+    assert {"disruption", "crowding", "total"}.issubset(daily.columns)
+    loaded = load_public_signals(tmp_path)
+    assert len(loaded) == len(signals[signals["category"].isin(["crowding", "delay", "disruption"])])
+    assert loaded["text"].eq("").all()
+    assert loaded["author_id"].isna().all()
+
+
+def test_dedupe_key_is_stable_and_case_insensitive() -> None:
+    assert dedupe_key("UserA", "LRT SESAK") == dedupe_key("usera", "lrt sesak")
+    assert dedupe_key("UserA", "LRT SESAK") != dedupe_key("UserA", "lrt sesak juga")
+    assert len(dedupe_key(None, "text")) == 40
+
+
+def test_rows_from_signals_dedupeable_and_roundtrips() -> None:
+    signals = _synthetic_signals()
+    rows = rows_from_signals(signals)
+    assert len(rows) == len(signals)
+    assert {col in rows[0] for col in ("dedupe_key", "text", "category", "station", "author_id", "observed_at")} == {True}
+    keys = [row["dedupe_key"] for row in rows]
+    assert len(keys) == len(set(keys))
+    restored = rows_to_dataframe(rows)
+    assert set(restored.columns) == {"text", "category", "station", "author_id", "observed_at"}
+    assert restored["text"].tolist() == signals["text"].tolist()
+
+
+class _FakeCursor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args) -> None:
+        return None
+
+    def execute(self, sql: str, params: list | None = None) -> None:
+        self.calls.append((sql, params or []))
+
+    def executemany(self, sql: str, rows: list) -> None:
+        self.calls.append((sql, rows))
+
+
+class _FakeConnection:
+    def __init__(self) -> None:
+        self._cursor = _FakeCursor()
+
+    def cursor(self) -> _FakeCursor:
+        return self._cursor
+
+    def commit(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def test_push_signals_batches_and_dedupes(monkeypatch) -> None:
+    def fake_connect() -> _FakeConnection:
+        return new_conn
+
+    monkeypatch.setattr("src.analysis.supabase_sync._connect", fake_connect)
+    monkeypatch.setenv(
+        "SUPABASE_DATABASE_URL",
+        "postgresql://postgres.x:secret%40x@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres",
+    )
+    new_conn = _FakeConnection()
+    signals = pd.concat([_synthetic_signals(), _synthetic_signals()], ignore_index=True)
+    pushed = push_signals(signals, chunk_size=100)
+    assert pushed == len(signals)
+    calls = new_conn._cursor.calls
+    assert any("CREATE TABLE IF NOT EXISTS" in sql for sql, _ in calls)
+    upsert = [(sql, rows) for sql, rows in calls if "ON CONFLICT (dedupe_key)" in sql]
+    assert len(upsert) == 1
+    sql, params = upsert[0]
+    assert "(?, ?, ?, ?, ?, ?)" not in sql and "(%s, %s, %s, %s, %s, %s)" in sql
+    assert len(params) == 6 * len(signals)
+    keys = {params[index] for index in range(0, len(params), 6)}
+    assert len(keys) == 4
+
+
+def test_supabase_creds_parses_encoded_password(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "SUPABASE_DATABASE_URL",
+        "postgresql://postgres.x:myLRTproject%40123@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres",
+    )
+    creds = supabase_creds()
+    assert creds["user"] == "postgres.x"
+    assert creds["password"] == "myLRTproject@123"
+    assert creds["host"] == "aws-0-ap-northeast-1.pooler.supabase.com"
+    assert creds["port"] == 5432
+    assert creds["database"] == "postgres"
+
+
+def test_naive_utc_handles_z_and_offset() -> None:
+    assert _naive_utc("2026-09-01T00:30:00Z") == pd.Timestamp("2026-09-01T00:30:00").to_pydatetime()
+    assert _naive_utc("2026-09-01T00:30:00+08:00") == pd.Timestamp("2026-08-31T16:30:00").to_pydatetime()
+
+
+class _FakeResultCursor(_FakeCursor):
+    def __init__(self, results: list[list[tuple]]) -> None:
+        super().__init__()
+        self._results = results
+        self._index = 0
+
+    def fetchall(self) -> list[tuple]:
+        rows = self._results[self._index]
+        self._index += 1
+        return rows
+
+
+class _FakeResultConnection(_FakeConnection):
+    def __init__(self, results: list[list[tuple]]) -> None:
+        self._cursor_obj = _FakeResultCursor(results)
+        super().__init__()
+
+    def cursor(self) -> _FakeResultCursor:
+        return self._cursor_obj
+
+
+def _patch_public_fetchers(monkeypatch, results: list[list[tuple]]) -> _FakeResultConnection:
+    new_conn = _FakeResultConnection(results)
+    monkeypatch.setattr("src.analysis.supabase_sync._connect", lambda: new_conn)
+    monkeypatch.setenv(
+        "SUPABASE_DATABASE_URL",
+        "postgresql://postgres.x:pw@host:5432/postgres",
+    )
+    return new_conn
+
+
+def test_fetch_public_signals_never_exposes_text_or_authors(monkeypatch) -> None:
+    conn = _patch_public_fetchers(
+        monkeypatch,
+        [[(pd.Timestamp("2026-01-01T00:30:00+00:00"), "crowding", "KJ24"), (pd.Timestamp("2026-01-02T01:00:00+00:00"), "delay", None)]],
+    )
+    frame = fetch_public_signals()
+    assert frame["text"].eq("").all()
+    assert frame["author_id"].isna().all()
+    assert set(frame.columns) == {"text", "category", "station", "author_id", "observed_at"}
+    assert frame["category"].tolist() == ["crowding", "delay"]
+
+
+def test_fetch_public_daily_counts_groups_by_my_date(monkeypatch) -> None:
+    conn = _patch_public_fetchers(
+        monkeypatch,
+        [
+            [
+                (pd.Timestamp("2026-01-01T00:30:00+08:00").date(), "crowding", 1),
+                (pd.Timestamp("2026-01-01T00:30:00+08:00").date(), "other", 2),
+            ],
+            [(pd.Timestamp("2026-01-01T00:30:00+08:00").date(), 3)],
+        ],
+    )
+    counts = fetch_public_daily_counts()
+    assert not counts.empty
+    row = counts.iloc[0]
+    assert row["crowding"] == 1 and row["other"] == 2
+    assert row["total"] == 3
+    assert {c in row.index for c in ("normal", "delay", "disruption")} == {True}
+
+
+def test_public_fetchers_fall_back_to_none_on_failure(monkeypatch) -> None:
+    def boom() -> object:
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr("src.analysis.supabase_sync._connect", boom)
+    monkeypatch.setenv("SUPABASE_DATABASE_URL", "postgresql://postgres.x:pw@host:5432/postgres")
+    assert fetch_public_signals() is None
+    assert fetch_public_daily_counts() is None
