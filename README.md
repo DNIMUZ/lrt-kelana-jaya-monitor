@@ -42,6 +42,45 @@ streamlit run dashboard/app.py
 
 API docs: http://127.0.0.1:8000/docs
 
+## Collecting Threads posts (Kelana Jaya LRT)
+
+`src/collectors/threads_scraper.py` searches Meta Threads by keyword through an
+Apify actor and turns matching public posts into classified, LRT-filtered signals
+stored in the SQLite database plus JSON/CSV exports under `data/processed/`.
+
+Setup:
+
+1. Create a free account at https://apify.com and copy your API token.
+2. Copy `.env.example` to `.env` and set `APIFY_TOKEN`. Edit
+   `THREADS_KEYWORDS` if you want different search phrases.
+
+Run:
+
+```powershell
+py -m src.collectors.threads_scraper
+```
+
+Useful flags (defaults come from `.env`):
+
+```powershell
+# Custom keywords, more depth, include replies
+py -m src.collectors.threads_scraper -k "lrt kelana jaya" "kelana jaya line" --max-results 100 --include-replies
+```
+
+Defaults:
+
+- Actor: `magicfingers/threads-scraper` (`THREADS_ACTOR_ID`)
+- Keywords: LRT Kelana Jaya variants incl. common misspellings (`THREADS_KEYWORDS`)
+- 50 results per query (`THREADS_MAX_RESULTS_PER_QUERY`)
+- Output: `data/lrt_monitor.db` + `data/processed/threads_*.json|csv`
+
+What it does per result: keeps only posts whose text matches the LRT keyword
+filter, classifies them (crowding/delay/disruption/other) with station mapping,
+and deduplicates overlapping search results by author + text. Search is billed
+per result by Apify ($0.50 per 1,000 posts on the default actor) and Threads
+keyword search without login only reaches back about one month, so run it on a
+schedule for continuous monitoring.
+
 ## Project structure
 
 ```text
