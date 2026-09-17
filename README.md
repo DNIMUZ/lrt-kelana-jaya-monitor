@@ -1,6 +1,34 @@
 # LRT Kelana Jaya Monitor
 
-An evidence-aware monitoring starter for the Kelana Jaya LRT Line. It combines historical demand, official operational facts, and public reports without presenting a prediction as official information.
+> An evidence-aware monitoring starter for the **Kelana Jaya Line** (KL rail transit). Combines **official daily
+> ridership data** (data.gov.my) with **public Threads chatter** (crowding / delay / disruption signals) to explain
+> *why* the line behaves the way it does - without ever presenting social gossip as official fact.
+
+## Features
+
+- **Bulk Threads collector** - keyword-driven scraping via an Apify SSR actor; ~300 curated queries; checkpointed
+  chunk cache; deduplicated, LRT-filtered, classified signals stored in SQLite.
+- **Data-quality pipeline** - five-stage filtering (recall → relevance → classification → station detection →
+  de-duplication) keeps the corpus clean; re-scrapes never double-count.
+- **Ridership x social analysis** - daily panel (Malaysia UTC+8), weekday/monthly seasonality, anomaly days,
+  lagged correlation, and a weekday-driven ridge forecast with holdout MAE / MAPE / R².
+- **Insights dashboard** - a publishable Streamlit app with five tabs: Overview, Seasonality & Anomalies,
+  Social Signals, *Why crowded? & Shah Alam* (evidence-based causality check), Correlation & Forecast.
+- **Live/status API** - FastAPI endpoints and an explainable status estimator.
+
+**Disclaimer:** signals are estimates drawn from public posts; official Rapid KL statements take precedence.
+Social numbers are sensors, not proof.
+
+## Contents
+
+- [Verified official source](#verified-official-source)
+- [Run locally](#run-locally)
+- [Collecting Threads posts](#collecting-threads-posts-kelana-jaya-lrt)
+- [Bulk collection (2000+ posts)](#bulk-collection-2000-posts)
+- [Insights dashboard](#insights-dashboard-social-x-ridership)
+- [Data quality: how good posts are separated from bad](#data-quality-how-good-posts-are-separated-from-bad)
+- [Project structure](#project-structure)
+- [Data integrity](#data-integrity)
 
 ## Current scope
 
@@ -36,11 +64,15 @@ py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 pytest
-uvicorn src.api.main:app --reload
-streamlit run dashboard/app.py
+streamlit run dashboard/insights_app.py   # insights dashboard (recommended)
+streamlit run dashboard/app.py            # demo live-status dashboard
+uvicorn src.api.main:app --reload         # FastAPI status & signals API
 ```
 
 API docs: http://127.0.0.1:8000/docs
+
+> **Note:** use the virtual environment's Python (`py -m streamlit run ...` or activation) - the app needs
+> the pinned `streamlit` / `altair` / `scikit-learn` versions in `requirements.txt`.
 
 ## Collecting Threads posts (Kelana Jaya LRT)
 
